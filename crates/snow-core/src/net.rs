@@ -1,9 +1,12 @@
-//! Transport: HTTPS for the PoW challenge, WebSocket for everything else.
-//! Every WebSocket message is one fixed-size frame.
+//! Transport. Every connection — DoH, the PoW fetch and the WebSockets — goes
+//! through one [`Dialer`]: direct TCP, or a Tor circuit in Tor mode. That way no
+//! request accidentally bypasses Tor.
 use futures_util::{SinkExt, StreamExt};
 use rand::rngs::OsRng;
 use snow_proto::{decode_frame, encode_frame, ClientMsg, ServerMsg};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream};
 
@@ -19,22 +22,75 @@ pub enum NetError {
     Rejected(u16),
 }
 
-/// TLS + HTTP setup for one chat.
-///
-/// For a real hostname, the address and ECH config come from DoH (see
-/// [`crate::dns`]), so neither the OS resolver nor the TLS SNI reveals which
-/// site we connect to. Localhost / IP literals (development) skip DoH and ECH.
-/// With `pins` empty, plain WebPKI validation is used (development only).
-#[derive(Clone)]
-pub struct Net {
-    tls: Arc<rustls::ClientConfig>,
-    pub http: reqwest::Client,
-    /// Pre-resolved addresses for the relay; empty = let the system resolve.
-    addrs: Vec<std::net::SocketAddr>,
-    pub ech: bool,
+pub fn io_err(e: impl std::fmt::Display) -> NetError {
+    NetError::Io(e.to_string())
 }
 
-fn tls_config(pins: &[[u8; 32]], ech: Option<&[u8]>) -> Result<rustls::ClientConfig, NetError> {
+pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
+pub type BoxStream = Box<dyn Stream>;
+
+/// How TCP connections are made.
+#[derive(Clone)]
+pub enum Dialer {
+    Direct,
+    #[cfg(feature = "tor")]
+    Tor(crate::tor::TorHandle),
+}
+
+impl Dialer {
+    pub fn is_tor(&self) -> bool {
+        !matches!(self, Dialer::Direct)
+    }
+
+    /// `addrs` (pre-resolved via DoH) are used when dialing directly. Over Tor the
+    /// exit relay resolves `host` itself, so our DoH answer isn't needed.
+    pub async fn dial(
+        &self,
+        host: &str,
+        port: u16,
+        addrs: &[SocketAddr],
+    ) -> Result<BoxStream, NetError> {
+        match self {
+            Dialer::Direct if addrs.is_empty() => Ok(Box::new(
+                TcpStream::connect((host, port)).await.map_err(io_err)?,
+            )),
+            Dialer::Direct => Ok(Box::new(TcpStream::connect(addrs).await.map_err(io_err)?)),
+            #[cfg(feature = "tor")]
+            Dialer::Tor(t) => t.connect(host, port).await,
+        }
+    }
+}
+
+/// One server we talk to.
+#[derive(Clone)]
+pub struct Endpoint {
+    pub host: String,
+    pub port: u16,
+    pub addrs: Vec<SocketAddr>,
+    /// `None` = plaintext (local development only).
+    pub tls: Option<Arc<rustls::ClientConfig>>,
+}
+
+impl Endpoint {
+    pub async fn connect(&self, dialer: &Dialer) -> Result<BoxStream, NetError> {
+        let tcp = dialer.dial(&self.host, self.port, &self.addrs).await?;
+        match &self.tls {
+            None => Ok(tcp),
+            Some(cfg) => {
+                let name =
+                    rustls::pki_types::ServerName::try_from(self.host.clone()).map_err(io_err)?;
+                let tls = tokio_rustls::TlsConnector::from(cfg.clone())
+                    .connect(name, tcp)
+                    .await
+                    .map_err(io_err)?;
+                Ok(Box::new(tls))
+            }
+        }
+    }
+}
+
+pub fn tls_config(pins: &[[u8; 32]], ech: Option<&[u8]>) -> Result<rustls::ClientConfig, NetError> {
     use rustls::client::{EchConfig, EchMode};
     let roots = Arc::new(rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
@@ -52,13 +108,13 @@ fn tls_config(pins: &[[u8; 32]], ech: Option<&[u8]>) -> Result<rustls::ClientCon
         }
         None => builder.with_safe_default_protocol_versions(),
     }
-    .map_err(|e| NetError::Io(e.to_string()))?;
-    Ok(if pins.is_empty() {
+    .map_err(io_err)?;
+    let mut cfg = if pins.is_empty() {
         builder.with_root_certificates(roots).with_no_client_auth()
     } else {
         let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
             .build()
-            .map_err(|e| NetError::Io(e.to_string()))?;
+            .map_err(io_err)?;
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(crate::pin::PinnedVerifier {
@@ -66,109 +122,124 @@ fn tls_config(pins: &[[u8; 32]], ech: Option<&[u8]>) -> Result<rustls::ClientCon
                 pins: pins.to_vec(),
             }))
             .with_no_client_auth()
-    })
+    };
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(cfg)
 }
 
 fn is_local(host: &str) -> bool {
     host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[')
 }
 
+/// Connection setup for one chat.
+///
+/// For a real hostname, the address and ECH config come from DoH (see
+/// [`crate::dns`]), so neither the OS resolver nor the TLS SNI reveals which
+/// site we connect to. Localhost / IP literals (development) skip DoH and ECH.
+/// With `pins` empty, plain WebPKI validation is used (development only).
+#[derive(Clone)]
+pub struct Net {
+    pub dialer: Dialer,
+    pub relay: Endpoint,
+    pub ech: bool,
+}
+
 impl Net {
-    pub async fn new(base: &str, pins: &[String]) -> Result<Self, NetError> {
-        let url = reqwest::Url::parse(base).map_err(|e| NetError::Io(e.to_string()))?;
+    pub async fn new(base: &str, pins: &[String], dialer: Dialer) -> Result<Self, NetError> {
+        let url = url::Url::parse(base).map_err(io_err)?;
         let host = url
             .host_str()
             .ok_or(NetError::Io("server URL has no host".into()))?
             .to_string();
         let port = url.port_or_known_default().unwrap_or(443);
+        let secure = url.scheme() == "https";
         let pins = crate::pin::parse_pins(pins);
         let resolved = if is_local(&host) {
             crate::dns::Resolved::default()
         } else {
-            let doh = crate::dns::doh_client(tls_config(&[], None)?);
-            crate::dns::resolve(&doh, &host).await?
+            crate::dns::resolve(&dialer, &host).await?
         };
-        let cfg = tls_config(&pins, resolved.ech.as_deref())?;
-        let addrs: Vec<_> = resolved
-            .addrs
-            .iter()
-            .map(|ip| std::net::SocketAddr::new(*ip, port))
-            .collect();
-        let mut http = reqwest::Client::builder()
-            .tls_backend_preconfigured(cfg.clone())
-            .user_agent("snowtalk"); // no version / device details
-        if !addrs.is_empty() {
-            http = http.resolve_to_addrs(&host, &addrs);
-        }
+        let tls = secure
+            .then(|| tls_config(&pins, resolved.ech.as_deref()))
+            .transpose()?
+            .map(Arc::new);
+        let addrs = if dialer.is_tor() {
+            Vec::new()
+        } else {
+            resolved
+                .addrs
+                .iter()
+                .map(|ip| SocketAddr::new(*ip, port))
+                .collect()
+        };
         Ok(Self {
-            tls: Arc::new(cfg),
-            http: http.build().map_err(|e| NetError::Io(e.to_string()))?,
-            addrs,
+            dialer,
+            relay: Endpoint {
+                host,
+                port,
+                addrs,
+                tls,
+            },
             ech: resolved.ech.is_some(),
         })
     }
 }
 
-pub async fn fetch_pow(net: &Net, base: &str, bucket: u8) -> Result<Vec<u8>, NetError> {
-    let r = net
-        .http
-        .get(format!("{base}/pow"))
-        .header("x-snow-bucket", bucket.to_string())
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| NetError::Io(e.to_string()))?;
-    Ok(r.bytes()
-        .await
-        .map_err(|e| NetError::Io(e.to_string()))?
-        .to_vec())
+pub async fn fetch_pow(net: &Net, bucket: u8) -> Result<Vec<u8>, NetError> {
+    let b = bucket.to_string();
+    let (status, body) = crate::http::request(
+        &net.dialer,
+        &net.relay,
+        "GET",
+        "/pow",
+        &[("x-snow-bucket", &b)],
+        &[],
+    )
+    .await?;
+    if status != 200 {
+        return Err(NetError::Io(format!("PoW fetch: HTTP {status}")));
+    }
+    Ok(body)
 }
 
-pub struct Ws(WebSocketStream<MaybeTlsStream<TcpStream>>);
-
-pub fn ws_url(base: &str, path: &str) -> String {
-    let b = base.strip_prefix("https://").map(|r| format!("wss://{r}"));
-    let b = b.or_else(|| base.strip_prefix("http://").map(|r| format!("ws://{r}")));
-    format!("{}{path}", b.unwrap_or_else(|| base.to_string()))
-}
+pub struct Ws(WebSocketStream<MaybeTlsStream<BoxStream>>);
 
 impl Ws {
-    /// Connect, passing `param` (`b.<bucket>` / `t.<ticket>`) as a subprotocol so it
-    /// never appears in a URL.
-    pub async fn connect(net: &Net, url: &str, param: &str) -> Result<Self, NetError> {
+    /// Connect to `path` on the relay, passing `param` (`b.<bucket>` / `t.<ticket>`)
+    /// as a subprotocol so it never appears in a URL.
+    pub async fn connect(net: &Net, path: &str, param: &str) -> Result<Self, NetError> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-        let mut req = url
-            .into_client_request()
-            .map_err(|e| NetError::Io(e.to_string()))?;
+        let ep = &net.relay;
+        let scheme = if ep.tls.is_some() { "wss" } else { "ws" };
+        let url = format!("{scheme}://{}:{}{path}", ep.host, ep.port);
+        let mut req = url.into_client_request().map_err(io_err)?;
         let protocols = format!("snowtalk.v1, {param}")
             .parse()
             .map_err(|_| NetError::BadFrame)?;
         req.headers_mut()
             .insert("sec-websocket-protocol", protocols);
-        let connector = Some(Connector::Rustls(net.tls.clone()));
-        let result = if net.addrs.is_empty() {
-            tokio_tungstenite::connect_async_tls_with_config(req, None, false, connector).await
-        } else {
-            let tcp = TcpStream::connect(&net.addrs[..])
-                .await
-                .map_err(|e| NetError::Io(e.to_string()))?;
-            tokio_tungstenite::client_async_tls_with_config(req, tcp, None, connector).await
+        let tcp = net.dialer.dial(&ep.host, ep.port, &ep.addrs).await?;
+        let connector = match &ep.tls {
+            Some(cfg) => Connector::Rustls(cfg.clone()),
+            None => Connector::Plain,
         };
-        let (s, _) = result.map_err(|e| match e {
-            tokio_tungstenite::tungstenite::Error::Http(r) if r.status().is_client_error() => {
-                NetError::Rejected(r.status().as_u16())
-            }
-            e => NetError::Io(e.to_string()),
-        })?;
+        let (s, _) =
+            tokio_tungstenite::client_async_tls_with_config(req, tcp, None, Some(connector))
+                .await
+                .map_err(|e| match e {
+                    tokio_tungstenite::tungstenite::Error::Http(r)
+                        if r.status().is_client_error() =>
+                    {
+                        NetError::Rejected(r.status().as_u16())
+                    }
+                    e => io_err(e),
+                })?;
         Ok(Self(s))
     }
 
     pub async fn send(&mut self, m: &ClientMsg) -> Result<(), NetError> {
         let f = encode_frame(m, &mut OsRng).map_err(|_| NetError::BadFrame)?;
-        self.0
-            .send(Message::Binary(f.into()))
-            .await
-            .map_err(|e| NetError::Io(e.to_string()))
+        self.0.send(Message::Binary(f.into())).await.map_err(io_err)
     }
 
     pub async fn recv(&mut self) -> Result<ServerMsg, NetError> {
@@ -180,16 +251,16 @@ impl Ws {
                 Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => continue,
                 Some(Ok(Message::Text(_))) => return Err(NetError::BadFrame),
                 Some(Ok(Message::Close(_))) | None => return Err(NetError::Closed),
-                Some(Err(e)) => return Err(NetError::Io(e.to_string())),
+                Some(Err(e)) => return Err(io_err(e)),
             }
         }
     }
 
-    /// Drop the TCP connection without a WebSocket close frame.
+    /// Drop the connection without a WebSocket close frame.
     pub async fn abort(&mut self) {
         use tokio::io::AsyncWriteExt;
         let _ = match self.0.get_mut() {
-            MaybeTlsStream::Plain(t) => t.shutdown().await,
+            MaybeTlsStream::Plain(s) => s.shutdown().await,
             MaybeTlsStream::Rustls(t) => t.get_mut().0.shutdown().await,
             _ => Ok(()),
         };

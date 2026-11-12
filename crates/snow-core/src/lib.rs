@@ -10,6 +10,7 @@ uniffi::setup_scaffolding!();
 mod api;
 mod dns;
 mod engine;
+mod http;
 mod net;
 mod pacer;
 mod pin;
@@ -30,24 +31,14 @@ pub fn debug_net_check(url: &str) -> Result<(bool, String), String> {
         .build()
         .map_err(|e| e.to_string())?;
     rt.block_on(async {
-        let base = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
-        let origin = format!(
-            "{}://{}",
-            base.scheme(),
-            base.host_str().unwrap_or_default()
-        );
-        let n = net::Net::new(&origin, &[])
+        let u = url::Url::parse(url).map_err(|e| e.to_string())?;
+        let origin = format!("{}://{}", u.scheme(), u.host_str().unwrap_or_default());
+        let n = net::Net::new(&origin, &[], net::Dialer::Direct)
             .await
             .map_err(|e| e.to_string())?;
-        let body = n
-            .http
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .text()
+        let (_, body) = http::request(&n.dialer, &n.relay, "GET", u.path(), &[], &[])
             .await
             .map_err(|e| e.to_string())?;
-        Ok((n.ech, body))
+        Ok((n.ech, String::from_utf8_lossy(&body).into_owned()))
     })
 }

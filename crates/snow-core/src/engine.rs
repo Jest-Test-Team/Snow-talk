@@ -65,8 +65,8 @@ async fn run_inner(
 
     // 1. Proof of work.
     l.on_state(ChatState::SolvingPow);
-    let netw = net::Net::new(base, &cfg.pins).await?;
-    let challenge = net::fetch_pow(&netw, base, bucket).await?;
+    let netw = net::Net::new(base, &cfg.pins, net::Dialer::Direct).await?;
+    let challenge = net::fetch_pow(&netw, bucket).await?;
     let c = snow_pow::Challenge::from_bytes(&challenge).map_err(|_| EngineError::Protocol)?;
     let nonce = tokio::task::spawn_blocking(move || c.solve())
         .await
@@ -74,7 +74,7 @@ async fn run_inner(
 
     // 2. Matchmaking.
     l.on_state(ChatState::Queued);
-    let mut mm = Ws::connect(&netw, &net::ws_url(base, "/match"), &format!("b.{bucket}")).await?;
+    let mut mm = Ws::connect(&netw, "/match", &format!("b.{bucket}")).await?;
     mm.send(&ClientMsg::Join {
         pow: snow_proto::PowSolution { challenge, nonce },
         bucket: cfg.bucket,
@@ -98,8 +98,8 @@ async fn run_inner(
 
     // 3. Room + handshake + chat.
     l.on_state(ChatState::Handshaking);
-    let room_url = net::ws_url(base, "/room");
-    let (mut room, mut resume, peer_present) = join_room(&netw, &room_url, &ticket).await?;
+    let room_url = "/room";
+    let (mut room, mut resume, peer_present) = join_room(&netw, room_url, &ticket).await?;
     let mut chat = Chat::new(role, frames);
     if peer_present {
         chat.send_commit(&mut room).await?;
@@ -135,7 +135,7 @@ async fn run_inner(
             _ = tokio::time::sleep_until(rotate_at) => {
                 // Session-ID rotation: enter the same slot on a fresh socket with
                 // the resume ticket; the room then revokes the old socket and ticket.
-                if let Ok((new, r, _)) = join_room(&netw, &room_url, &resume).await {
+                if let Ok((new, r, _)) = join_room(&netw, room_url, &resume).await {
                     let old = std::mem::replace(&mut room, new);
                     resume = r;
                     chat.drain(old, &mut room, l).await?;
@@ -156,7 +156,7 @@ async fn run_inner(
             },
         };
         if lost {
-            match reconnect(&netw, &room_url, &mut resume, cmds, &mut outbox, l).await? {
+            match reconnect(&netw, room_url, &mut resume, cmds, &mut outbox, l).await? {
                 Reconnect::Joined(ws) => {
                     room = *ws;
                     l.on_state(if chat.session.is_some() {
