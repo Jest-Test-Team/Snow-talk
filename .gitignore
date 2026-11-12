@@ -1,1 +1,14 @@
-.ignore/ref.txt
+.ignore/
+/target
+server/target
+server/build
+server/node_modules
+server/.wrangler
+.dev.vars
+*.xcframework
+apps/ios/**/xcuserdata
+apps/android/**/build
+apps/android/.gradle
+apps/android/local.properties
+/bindings
+.DS_Store
