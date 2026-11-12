@@ -19,48 +19,93 @@ pub enum NetError {
     Rejected(u16),
 }
 
-/// TLS + HTTP setup for one chat. With `pins` empty, plain WebPKI validation
-/// is used (development); release builds always ship pins.
+/// TLS + HTTP setup for one chat.
+///
+/// For a real hostname, the address and ECH config come from DoH (see
+/// [`crate::dns`]), so neither the OS resolver nor the TLS SNI reveals which
+/// site we connect to. Localhost / IP literals (development) skip DoH and ECH.
+/// With `pins` empty, plain WebPKI validation is used (development only).
 #[derive(Clone)]
 pub struct Net {
     tls: Arc<rustls::ClientConfig>,
     pub http: reqwest::Client,
+    /// Pre-resolved addresses for the relay; empty = let the system resolve.
+    addrs: Vec<std::net::SocketAddr>,
+    pub ech: bool,
+}
+
+fn tls_config(pins: &[[u8; 32]], ech: Option<&[u8]>) -> Result<rustls::ClientConfig, NetError> {
+    use rustls::client::{EchConfig, EchMode};
+    let roots = Arc::new(rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    });
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone());
+    let builder = match ech {
+        Some(list) => {
+            let cfg = EchConfig::new(
+                rustls::pki_types::EchConfigListBytes::from(list.to_vec()),
+                rustls::crypto::aws_lc_rs::hpke::ALL_SUPPORTED_SUITES,
+            )
+            .map_err(|e| NetError::Io(format!("ECH config: {e}")))?;
+            builder.with_ech(EchMode::Enable(cfg))
+        }
+        None => builder.with_safe_default_protocol_versions(),
+    }
+    .map_err(|e| NetError::Io(e.to_string()))?;
+    Ok(if pins.is_empty() {
+        builder.with_root_certificates(roots).with_no_client_auth()
+    } else {
+        let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
+            .build()
+            .map_err(|e| NetError::Io(e.to_string()))?;
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(crate::pin::PinnedVerifier {
+                inner,
+                pins: pins.to_vec(),
+            }))
+            .with_no_client_auth()
+    })
+}
+
+fn is_local(host: &str) -> bool {
+    host == "localhost" || host.parse::<std::net::IpAddr>().is_ok() || host.starts_with('[')
 }
 
 impl Net {
-    pub fn new(pins: &[String]) -> Self {
-        let roots = Arc::new(rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        });
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .expect("ring supports the default versions");
+    pub async fn new(base: &str, pins: &[String]) -> Result<Self, NetError> {
+        let url = reqwest::Url::parse(base).map_err(|e| NetError::Io(e.to_string()))?;
+        let host = url
+            .host_str()
+            .ok_or(NetError::Io("server URL has no host".into()))?
+            .to_string();
+        let port = url.port_or_known_default().unwrap_or(443);
         let pins = crate::pin::parse_pins(pins);
-        let cfg = if pins.is_empty() {
-            builder.with_root_certificates(roots).with_no_client_auth()
+        let resolved = if is_local(&host) {
+            crate::dns::Resolved::default()
         } else {
-            let inner =
-                rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
-                    .build()
-                    .expect("valid roots");
-            builder
-                .dangerous()
-                .with_custom_certificate_verifier(Arc::new(crate::pin::PinnedVerifier {
-                    inner,
-                    pins,
-                }))
-                .with_no_client_auth()
+            let doh = crate::dns::doh_client(tls_config(&[], None)?);
+            crate::dns::resolve(&doh, &host).await?
         };
-        let http = reqwest::Client::builder()
+        let cfg = tls_config(&pins, resolved.ech.as_deref())?;
+        let addrs: Vec<_> = resolved
+            .addrs
+            .iter()
+            .map(|ip| std::net::SocketAddr::new(*ip, port))
+            .collect();
+        let mut http = reqwest::Client::builder()
             .tls_backend_preconfigured(cfg.clone())
-            .user_agent("snowtalk") // no version / device details
-            .build()
-            .expect("http client");
-        Self {
-            tls: Arc::new(cfg),
-            http,
+            .user_agent("snowtalk"); // no version / device details
+        if !addrs.is_empty() {
+            http = http.resolve_to_addrs(&host, &addrs);
         }
+        Ok(Self {
+            tls: Arc::new(cfg),
+            http: http.build().map_err(|e| NetError::Io(e.to_string()))?,
+            addrs,
+            ech: resolved.ech.is_some(),
+        })
     }
 }
 
@@ -100,14 +145,16 @@ impl Ws {
             .map_err(|_| NetError::BadFrame)?;
         req.headers_mut()
             .insert("sec-websocket-protocol", protocols);
-        let (s, _) = tokio_tungstenite::connect_async_tls_with_config(
-            req,
-            None,
-            false,
-            Some(Connector::Rustls(net.tls.clone())),
-        )
-        .await
-        .map_err(|e| match e {
+        let connector = Some(Connector::Rustls(net.tls.clone()));
+        let result = if net.addrs.is_empty() {
+            tokio_tungstenite::connect_async_tls_with_config(req, None, false, connector).await
+        } else {
+            let tcp = TcpStream::connect(&net.addrs[..])
+                .await
+                .map_err(|e| NetError::Io(e.to_string()))?;
+            tokio_tungstenite::client_async_tls_with_config(req, tcp, None, connector).await
+        };
+        let (s, _) = result.map_err(|e| match e {
             tokio_tungstenite::tungstenite::Error::Http(r) if r.status().is_client_error() => {
                 NetError::Rejected(r.status().as_u16())
             }

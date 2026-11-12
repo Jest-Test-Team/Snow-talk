@@ -8,6 +8,7 @@
 uniffi::setup_scaffolding!();
 
 mod api;
+mod dns;
 mod engine;
 mod net;
 mod pacer;
@@ -19,4 +20,34 @@ pub use api::*;
 #[uniffi::export]
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Testing only (not exported over FFI): resolve `url`'s host via DoH, connect with
+/// ECH if the host publishes a config, and GET it. Returns `(ech_used, body)`.
+pub fn debug_net_check(url: &str) -> Result<(bool, String), String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(async {
+        let base = reqwest::Url::parse(url).map_err(|e| e.to_string())?;
+        let origin = format!(
+            "{}://{}",
+            base.scheme(),
+            base.host_str().unwrap_or_default()
+        );
+        let n = net::Net::new(&origin, &[])
+            .await
+            .map_err(|e| e.to_string())?;
+        let body = n
+            .http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .text()
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok((n.ech, body))
+    })
 }

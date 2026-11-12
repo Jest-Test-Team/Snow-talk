@@ -65,7 +65,7 @@ async fn run_inner(
 
     // 1. Proof of work.
     l.on_state(ChatState::SolvingPow);
-    let netw = net::Net::new(&cfg.pins);
+    let netw = net::Net::new(base, &cfg.pins).await?;
     let challenge = net::fetch_pow(&netw, base, bucket).await?;
     let c = snow_pow::Challenge::from_bytes(&challenge).map_err(|_| EngineError::Protocol)?;
     let nonce = tokio::task::spawn_blocking(move || c.solve())

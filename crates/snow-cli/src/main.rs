@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! snow-cli chat      [--server URL] [--bucket N]
+//! snow-cli net-check --server URL   # DoH + ECH diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
 //!                    [--scenario basic|reconnect|rotate|grace]
 //! ```
@@ -123,6 +124,13 @@ fn main() {
     let a = args();
     match a.cmd.as_str() {
         "chat" => chat(&a),
+        "net-check" => match debug_net_check(&a.server) {
+            Ok((ech, body)) => println!("ech config used: {ech}\n{body}"),
+            Err(e) => {
+                eprintln!("FAIL: {e}");
+                std::process::exit(1)
+            }
+        },
         "pair-test" => std::process::exit(match pair_test(&a) {
             Ok(()) => {
                 println!("PASS");
