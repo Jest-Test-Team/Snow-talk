@@ -19,7 +19,7 @@ required-features = ["bindgen"]
 [dependencies]
 base64 = "0.23.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
-hickory-proto = { version = "0.25.2", default-features = false, features = ["std"] }
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 postcard = { workspace = true, features = ["alloc"] }
 rand = "0.8"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }

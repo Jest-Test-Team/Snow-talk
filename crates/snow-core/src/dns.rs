@@ -39,11 +39,11 @@ pub async fn resolve(doh: &reqwest::Client, host: &str) -> Result<Resolved, NetE
     let mut out = Resolved::default();
     for m in [a, aaaa].into_iter().flatten() {
         out.addrs
-            .extend(m.answers().iter().filter_map(|r| r.data().ip_addr()));
+            .extend(m.answers.iter().filter_map(|r| r.data.ip_addr()));
     }
     if let Ok(m) = https {
-        out.ech = m.answers().iter().find_map(|r| match r.data() {
-            RData::HTTPS(h) => h.0.svc_params().iter().find_map(|(_, v)| match v {
+        out.ech = m.answers.iter().find_map(|r| match &r.data {
+            RData::HTTPS(h) => h.0.svc_params.iter().find_map(|(_, v)| match v {
                 SvcParamValue::EchConfigList(e) => Some(e.0.clone()),
                 _ => None,
             }),
@@ -58,15 +58,13 @@ pub async fn resolve(doh: &reqwest::Client, host: &str) -> Result<Resolved, NetE
 
 async fn query(doh: &reqwest::Client, host: &str, rt: RecordType) -> Result<Message, NetError> {
     let io = |e: &dyn std::fmt::Display| NetError::Io(format!("DoH: {e}"));
-    let mut m = Message::new();
-    m.set_id(0) // RFC 8484 §4.1: use 0 for cache friendliness
-        .set_message_type(MessageType::Query)
-        .set_op_code(OpCode::Query)
-        .set_recursion_desired(true)
-        .add_query(Query::query(
-            Name::from_ascii(host).map_err(|e| io(&e))?,
-            rt,
-        ));
+    // RFC 8484 §4.1: id 0 for cache friendliness.
+    let mut m = Message::new(0, MessageType::Query, OpCode::Query);
+    m.metadata.recursion_desired = true;
+    m.add_query(Query::query(
+        Name::from_ascii(host).map_err(|e| io(&e))?,
+        rt,
+    ));
     let body = m.to_vec().map_err(|e| io(&e))?;
     let resp = doh
         .post(format!("https://{DOH_HOST}/dns-query"))
