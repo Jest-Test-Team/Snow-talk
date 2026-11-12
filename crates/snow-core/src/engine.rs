@@ -33,15 +33,51 @@ enum EngineError {
     Server(snow_proto::ErrorCode),
     #[error("protocol violation")]
     Protocol,
+    #[cfg(not(feature = "tor"))]
+    #[error("{0}")]
+    Unsupported(&'static str),
+}
+
+/// State shared by all chats of one `SnowClient`.
+#[derive(Default, Clone)]
+pub struct Shared {
+    pub frames: Arc<AtomicU64>,
+    /// Bootstrapped once, on the first chat in Tor mode.
+    #[cfg(feature = "tor")]
+    pub tor: Arc<tokio::sync::OnceCell<crate::tor::TorHandle>>,
+}
+
+async fn dialer(
+    cfg: &Config,
+    shared: &Shared,
+    l: &dyn ChatListener,
+) -> Result<net::Dialer, EngineError> {
+    let Some(dir) = &cfg.tor_dir else {
+        return Ok(net::Dialer::Direct);
+    };
+    #[cfg(feature = "tor")]
+    {
+        l.on_state(ChatState::ConnectingTor);
+        let h = shared
+            .tor
+            .get_or_try_init(|| crate::tor::TorHandle::bootstrap(dir))
+            .await?;
+        Ok(net::Dialer::Tor(h.isolated()))
+    }
+    #[cfg(not(feature = "tor"))]
+    {
+        let _ = (dir, shared, l);
+        Err(EngineError::Unsupported("this build has no Tor support"))
+    }
 }
 
 pub async fn run(
     cfg: Config,
     mut cmds: mpsc::UnboundedReceiver<Cmd>,
     l: Arc<dyn ChatListener>,
-    frames: Arc<AtomicU64>,
+    shared: Shared,
 ) {
-    let reason = match run_inner(&cfg, &mut cmds, &*l, frames).await {
+    let reason = match run_inner(&cfg, &mut cmds, &*l, shared).await {
         Ok(r) => r,
         Err(e) => EndReason::Error {
             message: e.to_string(),
@@ -58,14 +94,15 @@ async fn run_inner(
     cfg: &Config,
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
     l: &dyn ChatListener,
-    frames: Arc<AtomicU64>,
+    shared: Shared,
 ) -> Result<EndReason, EngineError> {
     let base = cfg.server_url.trim_end_matches('/');
     let bucket = cfg.bucket.unwrap_or(255);
 
     // 1. Proof of work.
     l.on_state(ChatState::SolvingPow);
-    let netw = net::Net::new(base, &cfg.pins, net::Dialer::Direct).await?;
+    let dialer = dialer(cfg, &shared, l).await?;
+    let netw = net::Net::new(base, &cfg.pins, dialer).await?;
     let challenge = net::fetch_pow(&netw, bucket).await?;
     let c = snow_pow::Challenge::from_bytes(&challenge).map_err(|_| EngineError::Protocol)?;
     let nonce = tokio::task::spawn_blocking(move || c.solve())
@@ -100,7 +137,7 @@ async fn run_inner(
     l.on_state(ChatState::Handshaking);
     let room_url = "/room";
     let (mut room, mut resume, peer_present) = join_room(&netw, room_url, &ticket).await?;
-    let mut chat = Chat::new(role, frames);
+    let mut chat = Chat::new(role, shared.frames.clone());
     if peer_present {
         chat.send_commit(&mut room).await?;
     }

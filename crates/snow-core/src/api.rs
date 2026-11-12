@@ -21,6 +21,10 @@ pub struct Config {
     /// Base64 SHA-256 SPKI pins for the relay's TLS chain. Empty = no pinning (dev only).
     #[uniffi(default = [])]
     pub pins: Vec<String>,
+    /// Tor mode: a private app directory for Arti's consensus/guard state.
+    /// `None` = direct connections. Requires a build with the `tor` feature.
+    #[uniffi(default = None)]
+    pub tor_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -44,6 +48,8 @@ pub enum EndReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ChatState {
+    /// Tor mode: bootstrapping or building a circuit (can take several seconds).
+    ConnectingTor,
     SolvingPow,
     Queued,
     Handshaking,
@@ -98,7 +104,7 @@ pub struct SnowClient {
     listener: Arc<dyn ChatListener>,
     cmd: Mutex<Option<mpsc::UnboundedSender<Cmd>>>,
     next_id: AtomicU64,
-    frames_sent: Arc<AtomicU64>,
+    shared: engine::Shared,
 }
 
 #[uniffi::export]
@@ -116,7 +122,7 @@ impl SnowClient {
             listener,
             cmd: Mutex::new(None),
             next_id: AtomicU64::new(1),
-            frames_sent: Arc::default(),
+            shared: engine::Shared::default(),
         })
     }
 
@@ -130,7 +136,7 @@ impl SnowClient {
             self.cfg.clone(),
             rx,
             self.listener.clone(),
-            self.frames_sent.clone(),
+            self.shared.clone(),
         ));
     }
 
@@ -172,7 +178,7 @@ impl SnowClient {
 
     /// Testing only: number of encrypted frames (text + chaff) this client has sent.
     pub fn debug_frames_sent(&self) -> u64 {
-        self.frames_sent.load(Ordering::Relaxed)
+        self.shared.frames.load(Ordering::Relaxed)
     }
 
     fn command(&self, c: Cmd) -> Result<(), CoreError> {

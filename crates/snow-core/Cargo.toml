@@ -10,8 +10,8 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [features]
 bindgen = ["uniffi/cli"]
-# Tor mode via Arti (implemented in the next commit).
-tor = []
+# Tor mode via Arti. Adds roughly 10 MB to the app.
+tor = ["dep:arti-client", "dep:tor-rtcompat"]
 
 [[bin]]
 name = "uniffi-bindgen"
@@ -19,6 +19,7 @@ path = "src/bin/uniffi-bindgen.rs"
 required-features = ["bindgen"]
 
 [dependencies]
+arti-client = { version = "0.48", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite"], optional = true }
 base64 = "0.23.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
@@ -36,6 +37,7 @@ thiserror.workspace = true
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tokio-rustls = { version = "0.26", default-features = false }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+tor-rtcompat = { version = "0.48", default-features = false, features = ["tokio", "rustls"], optional = true }
 uniffi = "0.32"
 url = "2.5.8"
 webpki-roots = "1.0.12"

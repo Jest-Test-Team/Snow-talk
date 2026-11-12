@@ -14,6 +14,8 @@ mod http;
 mod net;
 mod pacer;
 mod pin;
+#[cfg(feature = "tor")]
+mod tor;
 
 pub use api::*;
 
@@ -25,7 +27,8 @@ pub fn version() -> String {
 
 /// Testing only (not exported over FFI): resolve `url`'s host via DoH, connect with
 /// ECH if the host publishes a config, and GET it. Returns `(ech_used, body)`.
-pub fn debug_net_check(url: &str) -> Result<(bool, String), String> {
+/// With `tor_dir`, the request goes over Tor (needs the `tor` feature).
+pub fn debug_net_check(url: &str, tor_dir: Option<&str>) -> Result<(bool, String), String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -33,7 +36,18 @@ pub fn debug_net_check(url: &str) -> Result<(bool, String), String> {
     rt.block_on(async {
         let u = url::Url::parse(url).map_err(|e| e.to_string())?;
         let origin = format!("{}://{}", u.scheme(), u.host_str().unwrap_or_default());
-        let n = net::Net::new(&origin, &[], net::Dialer::Direct)
+        let dialer = match tor_dir {
+            None => net::Dialer::Direct,
+            #[cfg(feature = "tor")]
+            Some(d) => net::Dialer::Tor(
+                tor::TorHandle::bootstrap(d)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            ),
+            #[cfg(not(feature = "tor"))]
+            Some(_) => return Err("built without the tor feature".into()),
+        };
+        let n = net::Net::new(&origin, &[], dialer)
             .await
             .map_err(|e| e.to_string())?;
         let (_, body) = http::request(&n.dialer, &n.relay, "GET", u.path(), &[], &[])

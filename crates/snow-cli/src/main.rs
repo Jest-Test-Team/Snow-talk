@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! snow-cli chat      [--server URL] [--bucket N]
-//! snow-cli net-check --server URL   # DoH + ECH diagnostics
+//! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
 //!                    [--scenario basic|reconnect|rotate|grace]
 //! ```
@@ -57,6 +57,7 @@ struct Args {
     rotation_secs: Option<u32>,
     chaff_ms: Option<u32>,
     pins: Vec<String>,
+    tor_dir: Option<String>,
 }
 
 fn args() -> Args {
@@ -70,6 +71,7 @@ fn args() -> Args {
         rotation_secs: None,
         chaff_ms: None,
         pins: Vec::new(),
+        tor_dir: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -90,6 +92,7 @@ fn args() -> Args {
             }
             "--marker" => a.marker = it.next().expect("--marker TEXT"),
             "--scenario" => a.scenario = it.next().expect("--scenario NAME"),
+            "--tor" => a.tor_dir = Some(it.next().expect("--tor DIR")),
             "--pin" => a.pins.push(it.next().expect("--pin BASE64")),
             "--chaff" => {
                 a.chaff_ms = Some(it.next().and_then(|v| v.parse().ok()).expect("--chaff MS"))
@@ -114,6 +117,7 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
             rotation_secs: a.rotation_secs,
             chaff_ms: a.chaff_ms,
             pins: a.pins.clone(),
+            tor_dir: a.tor_dir.clone(),
         },
         Arc::new(Chan(tx)),
     );
@@ -124,7 +128,7 @@ fn main() {
     let a = args();
     match a.cmd.as_str() {
         "chat" => chat(&a),
-        "net-check" => match debug_net_check(&a.server) {
+        "net-check" => match debug_net_check(&a.server, a.tor_dir.as_deref()) {
             Ok((ech, body)) => println!("ech config used: {ech}\n{body}"),
             Err(e) => {
                 eprintln!("FAIL: {e}");
