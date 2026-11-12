@@ -34,3 +34,22 @@ and Android Studio with the SDK, NDK, and cmdline-tools before Phase 3.
 **Deviations / notes**
 - Olm v1 uses AES-256-CBC + HMAC-SHA-256 (MAC truncated to 8 bytes), not the AES-GCM / ChaCha20 named in the ref. That's the audited vodozemac default; v2 (full MAC) is still behind an experimental feature flag.
 - PoW calibration: on this Mac, solving at difficulty 16 takes about 23 ms. The default difficulty will start at 23 (about 2–3 s on a mid-range phone, to be confirmed on real devices) and is configurable on the server. SHA-256 hashcash is cheap for GPU-equipped bots, which is why the plan also adds token-based trust in Phase 9.
+
+## Phase 2 — Cloudflare relay (2026-11-12)
+
+| Plan item | Status |
+|---|---|
+| Worker router: `/pow`, `/match`, `/room` | ✅ `server/src/lib.rs` |
+| Matchmaker DO sharded by `region × bucket` | ✅ `mm:tw:{bucket}`. PoW is bound to the bucket (`rand[15]`) so one solution can't be replayed across shards; replay IDs live in DO storage and are swept by an alarm |
+| `priority` / `trusted` / `normal` queues | ⏭️ Only `normal` for now. The other two need tokens (Phase 9: trust, Phase 10: Fast Pass) and will be added then |
+| Matched → `newUniqueId` ChatRoom + HMAC tickets (30 s TTL) | ✅ `server/src/ticket.rs` (native unit tests) |
+| ChatRoom DO: hibernation API, 2 slots, only checks frames are 4096 bytes, forwards untouched, no payload storage | ✅ Re-frames `Relay` bytes without parsing them. Storage holds only per-slot generation/status |
+| Logging policy | ✅ `invocation_logs = false`; code only logs `matched` / `room_created` / `room_closed` |
+| E2E with `wrangler dev` + `snow-cli` bots | ✅ `scripts/e2e.sh`: pairs two bots, checks SAS and 5 messages each way plus leave propagation, then greps the logs and DO state for the plaintext marker (not found) |
+
+**Deviations / notes**
+- **New: tickets and buckets travel in headers (WebSocket subprotocol / `x-snow-bucket`), not URLs.** The plan put tickets in `/room/:ticket`. Testing showed that both peers' tickets share the room-ID prefix, so URL logs at the edge could link the two IPs.
+- The client-side engine and `snow-cli` (planned for Phase 3) were pulled forward because Phase 2 can't be verified end to end without them. Phase 3 is left with the UniFFI surface hardening and the native apps.
+- Pinned `wrangler@4.161.0` in `server/package.json`. The globally installed 4.33 can't parse the `import source` syntax that worker-build 0.9 emits.
+- A room currently ends as soon as either socket drops (`PeerGone`). The grace period comes in Phase 4.
+- Pairing latency on local dev is 25–60 ms.
