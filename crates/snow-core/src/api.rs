@@ -18,6 +18,9 @@ pub struct Config {
     /// Overridden by remote config in production.
     #[uniffi(default = None)]
     pub chaff_ms: Option<u32>,
+    /// Base64 SHA-256 SPKI pins for the relay's TLS chain. Empty = no pinning (dev only).
+    #[uniffi(default = [])]
+    pub pins: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]

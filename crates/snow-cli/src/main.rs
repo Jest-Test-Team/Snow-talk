@@ -45,6 +45,7 @@ impl ChatListener for Chan {
     }
 }
 
+#[derive(Clone)]
 struct Args {
     cmd: String,
     server: String,
@@ -54,6 +55,7 @@ struct Args {
     scenario: String,
     rotation_secs: Option<u32>,
     chaff_ms: Option<u32>,
+    pins: Vec<String>,
 }
 
 fn args() -> Args {
@@ -66,6 +68,7 @@ fn args() -> Args {
         scenario: "basic".into(),
         rotation_secs: None,
         chaff_ms: None,
+        pins: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -86,6 +89,7 @@ fn args() -> Args {
             }
             "--marker" => a.marker = it.next().expect("--marker TEXT"),
             "--scenario" => a.scenario = it.next().expect("--scenario NAME"),
+            "--pin" => a.pins.push(it.next().expect("--pin BASE64")),
             "--chaff" => {
                 a.chaff_ms = Some(it.next().and_then(|v| v.parse().ok()).expect("--chaff MS"))
             }
@@ -108,6 +112,7 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
             bucket: a.bucket,
             rotation_secs: a.rotation_secs,
             chaff_ms: a.chaff_ms,
+            pins: a.pins.clone(),
         },
         Arc::new(Chan(tx)),
     );
@@ -186,13 +191,7 @@ fn wait<T>(
 }
 
 fn pair_test(a: &Args) -> Result<(), String> {
-    let mut a2 = Args {
-        cmd: String::new(),
-        scenario: a.scenario.clone(),
-        marker: a.marker.clone(),
-        server: a.server.clone(),
-        ..*a
-    };
+    let mut a2 = a.clone();
     if a.scenario == "rotate" {
         a2.rotation_secs = Some(2);
     }

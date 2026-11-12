@@ -11,6 +11,7 @@ mod api;
 mod engine;
 mod net;
 mod pacer;
+mod pin;
 
 pub use api::*;
 

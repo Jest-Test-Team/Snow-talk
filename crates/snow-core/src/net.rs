@@ -3,7 +3,7 @@
 use futures_util::{SinkExt, StreamExt};
 use rand::rngs::OsRng;
 use snow_proto::{decode_frame, encode_frame, ClientMsg, ServerMsg};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream};
 
@@ -19,39 +19,54 @@ pub enum NetError {
     Rejected(u16),
 }
 
-fn tls() -> Arc<rustls::ClientConfig> {
-    static CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    CFG.get_or_init(|| {
-        let roots = rustls::RootCertStore {
+/// TLS + HTTP setup for one chat. With `pins` empty, plain WebPKI validation
+/// is used (development); release builds always ship pins.
+#[derive(Clone)]
+pub struct Net {
+    tls: Arc<rustls::ClientConfig>,
+    pub http: reqwest::Client,
+}
+
+impl Net {
+    pub fn new(pins: &[String]) -> Self {
+        let roots = Arc::new(rustls::RootCertStore {
             roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
+        });
         let provider = Arc::new(rustls::crypto::ring::default_provider());
-        // Certificate pinning is added in Phase 5 (custom verifier).
-        Arc::new(
-            rustls::ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .expect("ring supports the default versions")
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-        )
-    })
-    .clone()
+        let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("ring supports the default versions");
+        let pins = crate::pin::parse_pins(pins);
+        let cfg = if pins.is_empty() {
+            builder.with_root_certificates(roots).with_no_client_auth()
+        } else {
+            let inner =
+                rustls::client::WebPkiServerVerifier::builder_with_provider(roots, provider)
+                    .build()
+                    .expect("valid roots");
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(crate::pin::PinnedVerifier {
+                    inner,
+                    pins,
+                }))
+                .with_no_client_auth()
+        };
+        let http = reqwest::Client::builder()
+            .tls_backend_preconfigured(cfg.clone())
+            .user_agent("snowtalk") // no version / device details
+            .build()
+            .expect("http client");
+        Self {
+            tls: Arc::new(cfg),
+            http,
+        }
+    }
 }
 
-pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .tls_backend_preconfigured((*tls()).clone())
-        .user_agent("snowtalk") // no version / device details
-        .build()
-        .expect("http client")
-}
-
-pub async fn fetch_pow(
-    http: &reqwest::Client,
-    base: &str,
-    bucket: u8,
-) -> Result<Vec<u8>, NetError> {
-    let r = http
+pub async fn fetch_pow(net: &Net, base: &str, bucket: u8) -> Result<Vec<u8>, NetError> {
+    let r = net
+        .http
         .get(format!("{base}/pow"))
         .header("x-snow-bucket", bucket.to_string())
         .send()
@@ -75,7 +90,7 @@ pub fn ws_url(base: &str, path: &str) -> String {
 impl Ws {
     /// Connect, passing `param` (`b.<bucket>` / `t.<ticket>`) as a subprotocol so it
     /// never appears in a URL.
-    pub async fn connect(url: &str, param: &str) -> Result<Self, NetError> {
+    pub async fn connect(net: &Net, url: &str, param: &str) -> Result<Self, NetError> {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut req = url
             .into_client_request()
@@ -89,7 +104,7 @@ impl Ws {
             req,
             None,
             false,
-            Some(Connector::Rustls(tls())),
+            Some(Connector::Rustls(net.tls.clone())),
         )
         .await
         .map_err(|e| match e {
