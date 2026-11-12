@@ -5,4 +5,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
 [dependencies]
+uniffi = "0.32"
