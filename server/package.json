@@ -1,0 +1,11 @@
+{
+  "name": "snow-talk-server",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.161.0"
+  }
+}

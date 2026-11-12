@@ -12,3 +12,4 @@ apps/android/.gradle
 apps/android/local.properties
 /bindings
 .DS_Store
+server/package-lock.json

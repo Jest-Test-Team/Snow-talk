@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev`. In production use `wrangler secret put`.
+POW_KEY="dev-pow-key-change-me"
+TICKET_KEY="dev-ticket-key-change-me"
+POW_DIFFICULTY="12"

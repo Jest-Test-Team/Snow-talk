@@ -1,0 +1,30 @@
+name = "snow-talk"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-10-01"
+
+[build]
+command = "worker-build --release"
+
+[vars]
+POW_DIFFICULTY = "23"
+
+[[durable_objects.bindings]]
+name = "MATCHMAKER"
+class_name = "Matchmaker"
+
+[[durable_objects.bindings]]
+name = "CHATROOM"
+class_name = "ChatRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Matchmaker", "ChatRoom"]
+
+# Logging policy: request metadata (which includes client IPs) is never collected.
+# Code only logs lifecycle event names; see src/util.rs `event()`.
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+invocation_logs = false
