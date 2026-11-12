@@ -53,3 +53,20 @@ and Android Studio with the SDK, NDK, and cmdline-tools before Phase 3.
 - Pinned `wrangler@4.161.0` in `server/package.json`. The globally installed 4.33 can't parse the `import source` syntax that worker-build 0.9 emits.
 - A room currently ends as soon as either socket drops (`PeerGone`). The grace period comes in Phase 4.
 - Pairing latency on local dev is 25–60 ms.
+
+## Phase 4 — Connection resilience (2026-11-12)
+
+| Plan item | Status |
+|---|---|
+| Deliberate leave → peer sees "對方已離開" immediately | ✅ `ClientMsg::Leave` → `PeerLeft` (scenario `basic`) |
+| Unexpected drop → slot held 3 min by DO `alarm()`, peer gets the countdown | ✅ `GRACE_SECS` var (default 180) → `PeerDisconnected { grace_secs }` → `PeerGone` on expiry (scenario `grace`, run with 4 s) |
+| Resume credential kept only in RAM; ratchet survives in RAM | ✅ The resume ticket lives in the engine task. A reconnect keeps the same `ChatSession` (scenario `reconnect`) |
+| iOS `beginBackgroundTask` | ⏭️ Native shell work, moved to Phase 3 |
+| Session-ID rotation every N (random) minutes with overlap, no lost messages | ✅ Client-driven: re-enter with the resume ticket, the room bumps the generation and revokes the old socket and ticket, and the client drains the old socket. 8–15 min by default (scenario `rotate`: 6 rotations in 7 s, 33 round trips, no loss) |
+| No cookies / JWT; short-lived single-use tickets | ✅ Every entry bumps the generation, so each resume ticket works exactly once |
+
+**Deviations / notes**
+- The plan had an *encrypted* `Control::Leave`. The server has to know about a leave anyway to close the room, so a plaintext `ClientMsg::Leave` doesn't reveal anything new.
+- Added (not in the plan): while a peer is reconnecting, the room holds up to 32 ciphertext frames **in RAM only**. They're lost if the DO is evicted, which is acceptable: Olm handles gaps.
+- `ServerMsg::Rotate` (server-initiated rotation) exists in the protocol but isn't used. Client-driven rotation turned out simpler.
+- A rotation is invisible to the peer: `PeerReconnected` is only sent if the slot really was `Disconnected`.
