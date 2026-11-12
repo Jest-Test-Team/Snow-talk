@@ -15,6 +15,8 @@ pub enum NetError {
     BadFrame,
     #[error("connection closed")]
     Closed,
+    #[error("server refused the connection (HTTP {0})")]
+    Rejected(u16),
 }
 
 fn tls() -> Arc<rustls::ClientConfig> {
@@ -90,7 +92,12 @@ impl Ws {
             Some(Connector::Rustls(tls())),
         )
         .await
-        .map_err(|e| NetError::Io(e.to_string()))?;
+        .map_err(|e| match e {
+            tokio_tungstenite::tungstenite::Error::Http(r) if r.status().is_client_error() => {
+                NetError::Rejected(r.status().as_u16())
+            }
+            e => NetError::Io(e.to_string()),
+        })?;
         Ok(Self(s))
     }
 
@@ -114,6 +121,16 @@ impl Ws {
                 Some(Err(e)) => return Err(NetError::Io(e.to_string())),
             }
         }
+    }
+
+    /// Drop the TCP connection without a WebSocket close frame.
+    pub async fn abort(&mut self) {
+        use tokio::io::AsyncWriteExt;
+        let _ = match self.0.get_mut() {
+            MaybeTlsStream::Plain(t) => t.shutdown().await,
+            MaybeTlsStream::Rustls(t) => t.get_mut().0.shutdown().await,
+            _ => Ok(()),
+        };
     }
 
     pub async fn close(mut self) {

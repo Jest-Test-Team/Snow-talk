@@ -7,7 +7,15 @@ use crate::ticket::{Kind, Ticket};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
 use snow_proto::{ClientMsg, ErrorCode, ServerMsg};
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use worker::*;
+
+/// Default reconnect grace period (free tier). Overridable with the `GRACE_SECS` var.
+const DEFAULT_GRACE_SECS: u32 = 180;
+/// Frames held in memory for a disconnected peer. Best-effort only: this buffer
+/// is never written to storage and is lost if the object hibernates or restarts.
+const HOLD_FRAMES: usize = 32;
 
 /// Resume tickets outlive the grace period; the room enforces the real deadline.
 const RESUME_TICKET_TTL_MS: u64 = 24 * 3600 * 1000;
@@ -41,6 +49,8 @@ struct Att {
 pub struct ChatRoom {
     state: State,
     env: Env,
+    /// Ciphertext frames waiting for a disconnected slot (in RAM only).
+    held: RefCell<[VecDeque<Vec<u8>>; 2]>,
 }
 
 fn tag(slot: u8) -> &'static str {
@@ -122,22 +132,76 @@ impl ChatRoom {
         Ok(())
     }
 
-    /// Called when the slot's active socket goes away without `Leave`.
-    /// Phase 2: the room ends at once. Phase 4 replaces this with a grace period.
+    fn grace_secs(&self) -> u32 {
+        self.env
+            .var("GRACE_SECS")
+            .ok()
+            .and_then(|v| v.to_string().parse().ok())
+            .unwrap_or(DEFAULT_GRACE_SECS)
+    }
+
+    /// The slot's active socket went away without `Leave`: hold the slot for the
+    /// grace period and tell the peer how long it will wait.
     async fn on_disconnect(&self, slot: u8) -> Result<()> {
         let mut s = self.slot(slot).await?;
         if s.status != SlotStatus::Connected {
             return Ok(());
         }
-        s.status = SlotStatus::Left;
+        let grace = self.grace_secs();
+        s.status = SlotStatus::Disconnected;
+        s.deadline_ms = now_ms() + grace as u64 * 1000;
         self.put_slot(slot, s).await?;
-        self.close_room(Some((1 - slot, ServerMsg::PeerGone))).await
+        if self.slot(1 - slot).await?.status == SlotStatus::Disconnected {
+            // Both sides are gone; nobody is left to wait.
+            return self.close_room(None).await;
+        }
+        self.send_to(1 - slot, &ServerMsg::PeerDisconnected { grace_secs: grace })
+            .await?;
+        self.schedule_alarm().await
+    }
+
+    /// Point the single alarm at the earliest grace deadline.
+    async fn schedule_alarm(&self) -> Result<()> {
+        let mut next: Option<u64> = None;
+        for i in 0..2 {
+            let s = self.slot(i).await?;
+            if s.status == SlotStatus::Disconnected {
+                next = Some(next.map_or(s.deadline_ms, |n| n.min(s.deadline_ms)));
+            }
+        }
+        if let Some(t) = next {
+            let delay = t.saturating_sub(now_ms()).max(1) as i64;
+            self.state.storage().set_alarm(delay).await?;
+        }
+        Ok(())
+    }
+
+    /// Relay to the peer, or hold a few frames in RAM while it is reconnecting.
+    async fn relay(&self, to: u8, bytes: Vec<u8>) -> Result<()> {
+        let s = self.slot(to).await?;
+        match s.status {
+            SlotStatus::Connected => self.send_to(to, &ServerMsg::Relay(bytes)).await,
+            SlotStatus::Disconnected => {
+                let mut held = self.held.borrow_mut();
+                let q = &mut held[to as usize];
+                if q.len() == HOLD_FRAMES {
+                    q.pop_front();
+                }
+                q.push_back(bytes);
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
 impl DurableObject for ChatRoom {
     fn new(state: State, env: Env) -> Self {
-        Self { state, env }
+        Self {
+            state,
+            env,
+            held: RefCell::new([VecDeque::new(), VecDeque::new()]),
+        }
     }
 
     /// Only the Worker can reach this, after verifying the ticket's MAC and expiry.
@@ -162,6 +226,7 @@ impl DurableObject for ChatRoom {
         // Each successful entry bumps the generation, which revokes the old ticket
         // and marks any older socket for this slot as stale.
         let first_entry = s.status == SlotStatus::Empty;
+        let was_disconnected = s.status == SlotStatus::Disconnected;
         s.gen += 1;
         s.status = SlotStatus::Connected;
         s.deadline_ms = 0;
@@ -196,7 +261,14 @@ impl DurableObject for ChatRoom {
             },
         )?;
         if resumed {
-            self.send_to(1 - slot, &ServerMsg::PeerReconnected).await?;
+            let held: Vec<_> = self.held.borrow_mut()[slot as usize].drain(..).collect();
+            for bytes in held {
+                send(&pair.server, &ServerMsg::Relay(bytes))?;
+            }
+            // A rotation (resume while still connected) is invisible to the peer.
+            if was_disconnected {
+                self.send_to(1 - slot, &ServerMsg::PeerReconnected).await?;
+            }
         } else {
             self.send_to(1 - slot, &ServerMsg::PeerJoined).await?;
             if first_entry && peer.status == SlotStatus::Empty {
@@ -215,11 +287,8 @@ impl DurableObject for ChatRoom {
             return Ok(());
         }
         match decode(msg) {
-            // Forwarded unchanged. If the peer is offline the frame is dropped; the
-            // Double Ratchet tolerates gaps and the client shows the peer's state.
-            Some(ClientMsg::Relay(bytes)) => {
-                self.send_to(1 - att.slot, &ServerMsg::Relay(bytes)).await
-            }
+            // Forwarded unchanged (or briefly held in RAM if the peer is reconnecting).
+            Some(ClientMsg::Relay(bytes)) => self.relay(1 - att.slot, bytes).await,
             Some(ClientMsg::Leave) => {
                 let mut s = self.slot(att.slot).await?;
                 s.status = SlotStatus::Left;
@@ -248,7 +317,18 @@ impl DurableObject for ChatRoom {
     async fn alarm(&self) -> Result<Response> {
         if self.closed().await? {
             self.state.storage().delete_all().await?;
+            return Response::empty();
         }
+        for i in 0..2u8 {
+            let mut s = self.slot(i).await?;
+            if s.status == SlotStatus::Disconnected && s.deadline_ms <= now_ms() {
+                s.status = SlotStatus::Left;
+                self.put_slot(i, s).await?;
+                self.close_room(Some((1 - i, ServerMsg::PeerGone))).await?;
+                return Response::empty();
+            }
+        }
+        self.schedule_alarm().await?;
         Response::empty()
     }
 }

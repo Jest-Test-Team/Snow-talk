@@ -9,7 +9,11 @@ pub struct Config {
     /// e.g. `https://relay.snowtalk.app` (or `http://127.0.0.1:8787` for development).
     pub server_url: String,
     /// Interest bucket `0..64`, or `None` for random matching.
+    #[uniffi(default = None)]
     pub bucket: Option<u8>,
+    /// Session-ID rotation period. `None` = random 8–15 minutes.
+    #[uniffi(default = None)]
+    pub rotation_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -22,6 +26,8 @@ pub enum EndReason {
     PeerGone,
     /// We cancelled before being matched.
     Cancelled,
+    /// Our connection dropped and couldn't be restored within the grace period.
+    ConnectionLost,
     /// Panic button: everything was wiped.
     Wiped,
     Error {
@@ -35,7 +41,13 @@ pub enum ChatState {
     Queued,
     Handshaking,
     Chatting,
-    Ended { reason: EndReason },
+    /// Our own connection dropped; retrying with the resume ticket.
+    Reconnecting {
+        seconds_left: u32,
+    },
+    Ended {
+        reason: EndReason,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -135,6 +147,11 @@ impl SnowClient {
 }
 
 impl SnowClient {
+    /// Testing only (not exported over FFI): simulate a network drop.
+    pub fn debug_drop_connection(&self) {
+        let _ = self.command(Cmd::DebugDrop);
+    }
+
     fn command(&self, c: Cmd) -> Result<(), CoreError> {
         let guard = self.cmd.lock().unwrap();
         let tx = guard.as_ref().ok_or(CoreError::NotChatting)?;

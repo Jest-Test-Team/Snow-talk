@@ -3,9 +3,16 @@
 //! ```text
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
+//!                    [--scenario basic|reconnect|rotate|grace]
 //! ```
 //! `pair-test` runs two clients in one process, pairs them, exchanges messages in
-//! both directions, checks that the SAS matches, leaves, and exits non-zero on failure.
+//! both directions, checks that the SAS matches, and exits non-zero on failure.
+//! Scenarios:
+//! * `basic`     — chat, then A leaves and B must see `PeerLeft`
+//! * `reconnect` — A's socket is killed; both must recover and keep chatting
+//! * `rotate`    — session IDs rotate every 2 s while chatting; nothing may be lost
+//! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
+//!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
 use std::io::BufRead;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -42,6 +49,8 @@ struct Args {
     bucket: Option<u8>,
     messages: usize,
     marker: String,
+    scenario: String,
+    rotation_secs: Option<u32>,
 }
 
 fn args() -> Args {
@@ -51,6 +60,8 @@ fn args() -> Args {
         bucket: None,
         messages: 5,
         marker: "SNOW-PLAINTEXT-MARKER".into(),
+        scenario: "basic".into(),
+        rotation_secs: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -70,6 +81,7 @@ fn args() -> Args {
                     .expect("--messages N")
             }
             "--marker" => a.marker = it.next().expect("--marker TEXT"),
+            "--scenario" => a.scenario = it.next().expect("--scenario NAME"),
             "-h" | "--help" => {
                 println!("usage: snow-cli (chat|pair-test) [--server URL] [--bucket N] [--messages N] [--marker TEXT]");
                 std::process::exit(0);
@@ -87,6 +99,7 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
         Config {
             server_url: a.server.clone(),
             bucket: a.bucket,
+            rotation_secs: a.rotation_secs,
         },
         Arc::new(Chan(tx)),
     );
@@ -165,8 +178,18 @@ fn wait<T>(
 }
 
 fn pair_test(a: &Args) -> Result<(), String> {
-    let (ca, ra) = client(a);
-    let (cb, rb) = client(a);
+    let mut a2 = Args {
+        cmd: String::new(),
+        scenario: a.scenario.clone(),
+        marker: a.marker.clone(),
+        server: a.server.clone(),
+        ..*a
+    };
+    if a.scenario == "rotate" {
+        a2.rotation_secs = Some(2);
+    }
+    let (ca, ra) = client(&a2);
+    let (cb, rb) = client(&a2);
     let t0 = Instant::now();
     ca.start_match();
     cb.start_match();
@@ -177,7 +200,6 @@ fn pair_test(a: &Args) -> Result<(), String> {
             None
         }
     };
-    let chatting = |ev: &Ev| matches!(ev, Ev::State(ChatState::Chatting)).then_some(());
     let sa = wait(&ra, "SAS on A", sas)?;
     wait(&ra, "A chatting", chatting)?;
     let sb = wait(&rb, "SAS on B", sas)?;
@@ -186,38 +208,99 @@ fn pair_test(a: &Args) -> Result<(), String> {
         return Err(format!("SAS mismatch: {sa:?} vs {sb:?}"));
     }
     println!("paired in {:?}, SAS {}", t0.elapsed(), sa.join(""));
+    let pair = Pair {
+        ca: &ca,
+        cb: &cb,
+        ra: &ra,
+        rb: &rb,
+        marker: &a.marker,
+    };
+    pair.exchange(a.messages, "warmup")?;
 
-    for i in 0..a.messages {
-        for (from, to_rx, name) in [(&ca, &rb, "A→B"), (&cb, &ra, "B→A")] {
-            let body = format!("{} {name} #{i} 你好", a.marker);
-            from.send_text(body.clone(), 0).map_err(|e| e.to_string())?;
-            let got = wait(to_rx, name, |ev| {
-                if let Ev::Msg(m) = ev {
-                    Some(m.body.clone())
-                } else {
-                    None
-                }
+    match a.scenario.as_str() {
+        "basic" => {
+            ca.leave();
+            wait(&ra, "A ended", |ev| ended(ev, EndReason::SelfLeft))?;
+            wait(&rb, "B sees peer left", |ev| ended(ev, EndReason::PeerLeft))?;
+            println!("leave propagated");
+        }
+        "reconnect" => {
+            ca.debug_drop_connection();
+            wait(&ra, "A reconnecting", |ev| {
+                matches!(ev, Ev::State(ChatState::Reconnecting { .. })).then_some(())
             })?;
-            if got != body {
-                return Err(format!("{name}: expected {body:?}, got {got:?}"));
+            wait(&ra, "A back", chatting)?;
+            // B may see Disconnected→Reconnected, or nothing if A was back before the room noticed.
+            pair.exchange(a.messages, "after-reconnect")?;
+            println!("recovered from a dropped connection");
+        }
+        "rotate" => {
+            let until = Instant::now() + Duration::from_secs(7);
+            let mut n = 0;
+            while Instant::now() < until {
+                pair.exchange(1, &format!("rot{n}"))?;
+                n += 1;
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            for (rx, who) in [(&ra, "A"), (&rb, "B")] {
+                if let Ok(ev) = rx.try_recv() {
+                    if matches!(ev, Ev::Peer(PeerEvent::Disconnected { .. }) | Ev::State(_)) {
+                        return Err(format!("{who} saw {ev:?} during rotation"));
+                    }
+                }
+            }
+            println!("{n} round trips across rotations, none lost");
+        }
+        "grace" => {
+            ca.panic_wipe();
+            let g = wait(&rb, "B sees disconnect", |ev| match ev {
+                Ev::Peer(PeerEvent::Disconnected { grace_secs }) => Some(*grace_secs),
+                _ => None,
+            })?;
+            let t = Instant::now();
+            wait(&rb, "B sees peer gone", |ev| ended(ev, EndReason::PeerGone))?;
+            println!("grace {g}s expired after {:?}", t.elapsed());
+        }
+        other => return Err(format!("unknown scenario {other}")),
+    }
+    Ok(())
+}
+
+fn chatting(ev: &Ev) -> Option<()> {
+    matches!(ev, Ev::State(ChatState::Chatting)).then_some(())
+}
+
+fn ended(ev: &Ev, want: EndReason) -> Option<()> {
+    matches!(ev, Ev::State(ChatState::Ended { reason }) if *reason == want).then_some(())
+}
+
+struct Pair<'a> {
+    ca: &'a SnowClient,
+    cb: &'a SnowClient,
+    ra: &'a Receiver<Ev>,
+    rb: &'a Receiver<Ev>,
+    marker: &'a str,
+}
+
+impl Pair<'_> {
+    /// Send `n` messages each way and check every one arrives intact.
+    fn exchange(&self, n: usize, tag: &str) -> Result<(), String> {
+        for i in 0..n {
+            for (from, to_rx, name) in [(self.ca, self.rb, "A→B"), (self.cb, self.ra, "B→A")] {
+                let body = format!("{} {tag} {name} #{i} 你好", self.marker);
+                from.send_text(body.clone(), 0).map_err(|e| e.to_string())?;
+                let got = wait(to_rx, name, |ev| {
+                    if let Ev::Msg(m) = ev {
+                        Some(m.body.clone())
+                    } else {
+                        None
+                    }
+                })?;
+                if got != body {
+                    return Err(format!("{name}: expected {body:?}, got {got:?}"));
+                }
             }
         }
+        Ok(())
     }
-    println!("exchanged {} messages each way", a.messages);
-
-    ca.leave();
-    wait(&ra, "A ended", |ev| match ev {
-        Ev::State(ChatState::Ended {
-            reason: EndReason::SelfLeft,
-        }) => Some(()),
-        _ => None,
-    })?;
-    wait(&rb, "B sees peer left", |ev| match ev {
-        Ev::State(ChatState::Ended {
-            reason: EndReason::PeerLeft,
-        }) => Some(()),
-        _ => None,
-    })?;
-    println!("leave propagated");
-    Ok(())
 }
