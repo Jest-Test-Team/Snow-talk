@@ -14,6 +14,10 @@ pub struct Config {
     /// Session-ID rotation period. `None` = random 8–15 minutes.
     #[uniffi(default = None)]
     pub rotation_secs: Option<u32>,
+    /// Cover-traffic period in ms. `None` = 1500 ms, `Some(0)` = off.
+    /// Overridden by remote config in production.
+    #[uniffi(default = None)]
+    pub chaff_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -91,6 +95,7 @@ pub struct SnowClient {
     listener: Arc<dyn ChatListener>,
     cmd: Mutex<Option<mpsc::UnboundedSender<Cmd>>>,
     next_id: AtomicU64,
+    frames_sent: Arc<AtomicU64>,
 }
 
 #[uniffi::export]
@@ -108,6 +113,7 @@ impl SnowClient {
             listener,
             cmd: Mutex::new(None),
             next_id: AtomicU64::new(1),
+            frames_sent: Arc::default(),
         })
     }
 
@@ -117,8 +123,12 @@ impl SnowClient {
         if let Some(old) = self.cmd.lock().unwrap().replace(tx) {
             let _ = old.send(Cmd::Wipe);
         }
-        self.rt
-            .spawn(engine::run(self.cfg.clone(), rx, self.listener.clone()));
+        self.rt.spawn(engine::run(
+            self.cfg.clone(),
+            rx,
+            self.listener.clone(),
+            self.frames_sent.clone(),
+        ));
     }
 
     /// Queue a text message. Returns its local id.
@@ -140,6 +150,11 @@ impl SnowClient {
         let _ = self.command(Cmd::Leave);
     }
 
+    /// Call from the app lifecycle: cover traffic pauses in the background.
+    pub fn set_foreground(&self, foreground: bool) {
+        let _ = self.command(Cmd::Foreground(foreground));
+    }
+
     /// Drop all keys and state immediately without telling the server anything.
     pub fn panic_wipe(&self) {
         let _ = self.command(Cmd::Wipe);
@@ -150,6 +165,11 @@ impl SnowClient {
     /// Testing only (not exported over FFI): simulate a network drop.
     pub fn debug_drop_connection(&self) {
         let _ = self.command(Cmd::DebugDrop);
+    }
+
+    /// Testing only: number of encrypted frames (text + chaff) this client has sent.
+    pub fn debug_frames_sent(&self) -> u64 {
+        self.frames_sent.load(Ordering::Relaxed)
     }
 
     fn command(&self, c: Cmd) -> Result<(), CoreError> {

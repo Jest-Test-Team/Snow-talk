@@ -1,8 +1,10 @@
 //! The per-chat async task: PoW → queue → room → handshake → chat.
 use crate::api::*;
 use crate::net::{self, NetError, Ws};
+use crate::pacer::{Out, Pacer};
 use snow_crypto::{ChatSession, CryptoError, Handshaker, Step};
 use snow_proto::{ClientMsg, Handshake, Inner, PeerEnvelope, Role, ServerMsg};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -17,6 +19,8 @@ pub enum Cmd {
     Wipe,
     /// Testing: kill the socket without a close frame, as a network drop would.
     DebugDrop,
+    /// App moved to the foreground (`true`) or background (`false`).
+    Foreground(bool),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -31,8 +35,13 @@ enum EngineError {
     Protocol,
 }
 
-pub async fn run(cfg: Config, mut cmds: mpsc::UnboundedReceiver<Cmd>, l: Arc<dyn ChatListener>) {
-    let reason = match run_inner(&cfg, &mut cmds, &*l).await {
+pub async fn run(
+    cfg: Config,
+    mut cmds: mpsc::UnboundedReceiver<Cmd>,
+    l: Arc<dyn ChatListener>,
+    frames: Arc<AtomicU64>,
+) {
+    let reason = match run_inner(&cfg, &mut cmds, &*l, frames).await {
         Ok(r) => r,
         Err(e) => EndReason::Error {
             message: e.to_string(),
@@ -49,6 +58,7 @@ async fn run_inner(
     cfg: &Config,
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
     l: &dyn ChatListener,
+    frames: Arc<AtomicU64>,
 ) -> Result<EndReason, EngineError> {
     let base = cfg.server_url.trim_end_matches('/');
     let bucket = cfg.bucket.unwrap_or(255);
@@ -77,7 +87,7 @@ async fn run_inner(
                 _ => return Err(EngineError::Protocol),
             },
             c = cmds.recv() => match c {
-                Some(Cmd::Send { .. } | Cmd::DebugDrop) => continue,
+                Some(Cmd::Send { .. } | Cmd::DebugDrop | Cmd::Foreground(_)) => continue,
                 Some(Cmd::Wipe) => { mm.close().await; return Ok(EndReason::Wiped) }
                 Some(Cmd::Leave) | None => { mm.close().await; return Ok(EndReason::Cancelled) }
             },
@@ -89,21 +99,30 @@ async fn run_inner(
     l.on_state(ChatState::Handshaking);
     let room_url = net::ws_url(base, "/room");
     let (mut room, mut resume, peer_present) = join_room(&room_url, &ticket).await?;
-    let mut chat = Chat::new(role);
+    let mut chat = Chat::new(role, frames);
     if peer_present {
         chat.send_commit(&mut room).await?;
     }
     let mut rotate_at = next_rotation(cfg);
     let mut outbox: Vec<Cmd> = Vec::new();
+    let mut pacer = Pacer::new(cfg.chaff_ms);
+    let mut foreground = true;
 
     loop {
-        // Flush anything typed while we were reconnecting.
+        // Anything typed while we were reconnecting goes back into the queue.
         for c in std::mem::take(&mut outbox) {
-            if let Cmd::Send { id, body, ttl_secs } = c {
-                chat.send_text(&mut room, id, &body, ttl_secs).await.ok();
+            match c {
+                Cmd::Send { id, body, ttl_secs } => pacer.push(id, body, ttl_secs),
+                Cmd::Foreground(f) => foreground = f,
+                _ => {}
             }
         }
+        let cover = foreground && chat.peer_online;
         let lost = tokio::select! {
+            out = pacer.next(cover), if chat.session.is_some() => match out {
+                Out::Text(p) => chat.send_text(&mut room, p.id, &p.body, p.ttl_secs).await.is_err(),
+                Out::Chaff => chat.send_chaff(&mut room).await.is_err(),
+            },
             m = room.recv() => match m {
                 Ok(m) => match chat.on_server(m, &mut room, l).await? {
                     Some(end) => return Ok(end),
@@ -124,9 +143,8 @@ async fn run_inner(
                 false
             }
             c = cmds.recv() => match c {
-                Some(Cmd::Send { id, body, ttl_secs }) => {
-                    chat.send_text(&mut room, id, &body, ttl_secs).await.is_err()
-                }
+                Some(Cmd::Send { id, body, ttl_secs }) => { pacer.push(id, body, ttl_secs); false }
+                Some(Cmd::Foreground(f)) => { foreground = f; false }
                 Some(Cmd::Leave) => {
                     let _ = room.send(&ClientMsg::Leave).await;
                     room.close().await;
@@ -214,7 +232,7 @@ async fn reconnect(
         tokio::select! {
             _ = tokio::time::sleep(backoff.min(left)) => {}
             c = cmds.recv() => match c {
-                Some(c @ Cmd::Send { .. }) => outbox.push(c),
+                Some(c @ (Cmd::Send { .. } | Cmd::Foreground(_))) => outbox.push(c),
                 Some(Cmd::DebugDrop) => {}
                 Some(Cmd::Leave) => return Ok(Reconnect::End(EndReason::SelfLeft)),
                 Some(Cmd::Wipe) | None => return Ok(Reconnect::End(EndReason::Wiped)),
@@ -227,16 +245,21 @@ async fn reconnect(
 /// Handshake/session state for one room.
 struct Chat {
     role: Role,
+    /// False while the room reports the peer as disconnected (no point sending cover traffic).
+    peer_online: bool,
+    frames: Arc<AtomicU64>,
     commit: Option<Handshake>,
     hs: Option<Handshaker>,
     session: Option<ChatSession>,
 }
 
 impl Chat {
-    fn new(role: Role) -> Self {
+    fn new(role: Role, frames: Arc<AtomicU64>) -> Self {
         let (hs, commit) = Handshaker::new(role);
         Self {
             role,
+            peer_online: true,
+            frames,
             commit: Some(commit),
             hs: Some(hs),
             session: None,
@@ -258,15 +281,26 @@ impl Chat {
         body: &str,
         ttl_secs: u32,
     ) -> Result<(), EngineError> {
-        let Some(s) = self.session.as_mut() else {
-            return Ok(());
-        };
-        let env = s.encrypt(&Inner::Text {
+        let inner = Inner::Text {
             id,
             body: body.to_string(),
             ttl_secs,
-        })?;
-        Ok(room.send(&relay(&env)).await?)
+        };
+        self.send_inner(room, &inner).await
+    }
+
+    async fn send_chaff(&mut self, room: &mut Ws) -> Result<(), EngineError> {
+        self.send_inner(room, &Inner::Chaff).await
+    }
+
+    async fn send_inner(&mut self, room: &mut Ws, inner: &Inner) -> Result<(), EngineError> {
+        let Some(s) = self.session.as_mut() else {
+            return Ok(());
+        };
+        let env = s.encrypt(inner)?;
+        room.send(&relay(&env)).await?;
+        self.frames.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Handle one server message. `Some` ends the chat.
@@ -286,9 +320,13 @@ impl Chat {
             ServerMsg::PeerLeft => return Ok(Some(EndReason::PeerLeft)),
             ServerMsg::PeerGone => return Ok(Some(EndReason::PeerGone)),
             ServerMsg::PeerDisconnected { grace_secs } => {
+                self.peer_online = false;
                 l.on_peer(PeerEvent::Disconnected { grace_secs })
             }
-            ServerMsg::PeerReconnected => l.on_peer(PeerEvent::Reconnected),
+            ServerMsg::PeerReconnected => {
+                self.peer_online = true;
+                l.on_peer(PeerEvent::Reconnected)
+            }
             ServerMsg::Error(c) => return Err(EngineError::Server(c)),
             ServerMsg::Rotate { .. } | ServerMsg::Joined { .. } | ServerMsg::Matched { .. } => {}
         }

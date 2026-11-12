@@ -11,6 +11,8 @@
 //! * `basic`     — chat, then A leaves and B must see `PeerLeft`
 //! * `reconnect` — A's socket is killed; both must recover and keep chatting
 //! * `rotate`    — session IDs rotate every 2 s while chatting; nothing may be lost
+//! * `chaff`     — idle clients must emit cover frames at the configured rate,
+//!   and stop in the background
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
@@ -51,6 +53,7 @@ struct Args {
     marker: String,
     scenario: String,
     rotation_secs: Option<u32>,
+    chaff_ms: Option<u32>,
 }
 
 fn args() -> Args {
@@ -62,6 +65,7 @@ fn args() -> Args {
         marker: "SNOW-PLAINTEXT-MARKER".into(),
         scenario: "basic".into(),
         rotation_secs: None,
+        chaff_ms: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -82,6 +86,9 @@ fn args() -> Args {
             }
             "--marker" => a.marker = it.next().expect("--marker TEXT"),
             "--scenario" => a.scenario = it.next().expect("--scenario NAME"),
+            "--chaff" => {
+                a.chaff_ms = Some(it.next().and_then(|v| v.parse().ok()).expect("--chaff MS"))
+            }
             "-h" | "--help" => {
                 println!("usage: snow-cli (chat|pair-test) [--server URL] [--bucket N] [--messages N] [--marker TEXT]");
                 std::process::exit(0);
@@ -100,6 +107,7 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
             server_url: a.server.clone(),
             bucket: a.bucket,
             rotation_secs: a.rotation_secs,
+            chaff_ms: a.chaff_ms,
         },
         Arc::new(Chan(tx)),
     );
@@ -188,6 +196,8 @@ fn pair_test(a: &Args) -> Result<(), String> {
     if a.scenario == "rotate" {
         a2.rotation_secs = Some(2);
     }
+    // Tests run with fast cover traffic unless told otherwise.
+    a2.chaff_ms = a.chaff_ms.or(Some(100));
     let (ca, ra) = client(&a2);
     let (cb, rb) = client(&a2);
     let t0 = Instant::now();
@@ -250,6 +260,29 @@ fn pair_test(a: &Args) -> Result<(), String> {
                 }
             }
             println!("{n} round trips across rotations, none lost");
+        }
+        "chaff" => {
+            let ms = a2.chaff_ms.unwrap_or(100) as u64;
+            let idle = Duration::from_secs(2);
+            let before = ca.debug_frames_sent();
+            std::thread::sleep(idle);
+            let sent = ca.debug_frames_sent() - before;
+            let expected = (idle.as_millis() as u64).checked_div(ms).unwrap_or(0);
+            println!("idle {idle:?}: {sent} cover frames (expected ≈{expected})");
+            if sent + 2 < expected || sent > expected + 2 {
+                return Err(format!("cover rate off: {sent} vs {expected}"));
+            }
+            ca.set_foreground(false);
+            std::thread::sleep(Duration::from_millis(3 * ms));
+            let before = ca.debug_frames_sent();
+            std::thread::sleep(idle);
+            let bg = ca.debug_frames_sent() - before;
+            println!("background: {bg} frames");
+            if bg != 0 {
+                return Err("cover traffic must stop in the background".into());
+            }
+            ca.set_foreground(true);
+            pair.exchange(1, "after-bg")?;
         }
         "grace" => {
             ca.panic_wipe();

@@ -31,3 +31,6 @@ tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"]
 uniffi = "0.32"
 webpki-roots = "1.0.12"
 zeroize.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["test-util", "macros", "rt"] }

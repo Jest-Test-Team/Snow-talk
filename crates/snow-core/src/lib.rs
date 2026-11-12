@@ -10,6 +10,7 @@ uniffi::setup_scaffolding!();
 mod api;
 mod engine;
 mod net;
+mod pacer;
 
 pub use api::*;
 
