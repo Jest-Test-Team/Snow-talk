@@ -254,6 +254,11 @@ impl ChatSession {
         decode_inner(&plaintext).map_err(|_| CryptoError::Plaintext)
     }
 
+    /// End the chat. The ratchet keys are zeroized as the session is dropped
+    /// (vodozemac's secret key types zeroize on drop); this method just makes
+    /// that explicit at call sites.
+    pub fn destroy(self) {}
+
     /// Short authentication string the users can compare out loud.
     pub fn sas(&self) -> Sas {
         self.sas
