@@ -44,12 +44,21 @@ pub struct ChatRoom {
 }
 
 fn tag(slot: u8) -> &'static str {
-    if slot == 0 { "s0" } else { "s1" }
+    if slot == 0 {
+        "s0"
+    } else {
+        "s1"
+    }
 }
 
 impl ChatRoom {
     async fn slot(&self, s: u8) -> Result<Slot> {
-        Ok(self.state.storage().get::<Slot>(tag(s)).await?.unwrap_or_default())
+        Ok(self
+            .state
+            .storage()
+            .get::<Slot>(tag(s))
+            .await?
+            .unwrap_or_default())
     }
 
     async fn put_slot(&self, s: u8, v: Slot) -> Result<()> {
@@ -57,7 +66,12 @@ impl ChatRoom {
     }
 
     async fn closed(&self) -> Result<bool> {
-        Ok(self.state.storage().get::<bool>("closed").await?.unwrap_or(false))
+        Ok(self
+            .state
+            .storage()
+            .get::<bool>("closed")
+            .await?
+            .unwrap_or(false))
     }
 
     /// Live sockets for `slot` whose generation is current.
@@ -157,7 +171,8 @@ impl DurableObject for ChatRoom {
         }
 
         let pair = WebSocketPair::new()?;
-        self.state.accept_websocket_with_tags(&pair.server, &[tag(slot)]);
+        self.state
+            .accept_websocket_with_tags(&pair.server, &[tag(slot)]);
         pair.server.serialize_attachment(Att { slot, gen: s.gen })?;
 
         let mut room = [0u8; 32];
@@ -173,7 +188,13 @@ impl DurableObject for ChatRoom {
         .sign(&secret(&self.env, "TICKET_KEY")?);
         let peer = self.slot(1 - slot).await?;
         let peer_present = peer.status == SlotStatus::Connected;
-        send(&pair.server, &ServerMsg::Joined { resume, peer_present })?;
+        send(
+            &pair.server,
+            &ServerMsg::Joined {
+                resume,
+                peer_present,
+            },
+        )?;
         if resumed {
             self.send_to(1 - slot, &ServerMsg::PeerReconnected).await?;
         } else {
@@ -182,7 +203,7 @@ impl DurableObject for ChatRoom {
                 event("room_created");
             }
         }
-        Response::from_websocket(pair.client)
+        upgrade_response(pair.client)
     }
 
     async fn websocket_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
@@ -196,18 +217,27 @@ impl DurableObject for ChatRoom {
         match decode(msg) {
             // Forwarded unchanged. If the peer is offline the frame is dropped; the
             // Double Ratchet tolerates gaps and the client shows the peer's state.
-            Some(ClientMsg::Relay(bytes)) => self.send_to(1 - att.slot, &ServerMsg::Relay(bytes)).await,
+            Some(ClientMsg::Relay(bytes)) => {
+                self.send_to(1 - att.slot, &ServerMsg::Relay(bytes)).await
+            }
             Some(ClientMsg::Leave) => {
                 let mut s = self.slot(att.slot).await?;
                 s.status = SlotStatus::Left;
                 self.put_slot(att.slot, s).await?;
-                self.close_room(Some((1 - att.slot, ServerMsg::PeerLeft))).await
+                self.close_room(Some((1 - att.slot, ServerMsg::PeerLeft)))
+                    .await
             }
             _ => send(&ws, &ServerMsg::Error(ErrorCode::BadFrame)),
         }
     }
 
-    async fn websocket_close(&self, ws: WebSocket, _code: usize, _reason: String, _clean: bool) -> Result<()> {
+    async fn websocket_close(
+        &self,
+        ws: WebSocket,
+        _code: usize,
+        _reason: String,
+        _clean: bool,
+    ) -> Result<()> {
         self.on_socket_gone(ws).await
     }
 

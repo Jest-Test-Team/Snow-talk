@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "Terminal client and end-to-end test bot built on snow-core."
 
 [dependencies]
 snow-core.workspace = true

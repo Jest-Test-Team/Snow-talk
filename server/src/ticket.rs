@@ -60,7 +60,12 @@ impl Ticket {
         let (body, tag) = b.split_at(BODY_LEN);
         let expected = mac(key, body);
         // Constant-time compare.
-        if expected.iter().zip(tag).fold(0u8, |acc, (x, y)| acc | (x ^ y)) != 0 {
+        if expected
+            .iter()
+            .zip(tag)
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            != 0
+        {
             return None;
         }
         let kind = match body[33] {
@@ -84,7 +89,13 @@ mod tests {
     use super::*;
 
     fn t() -> Ticket {
-        Ticket { room: [7; 32], slot: 1, kind: Kind::Join, gen: 0, exp: 1000 }
+        Ticket {
+            room: [7; 32],
+            slot: 1,
+            kind: Kind::Join,
+            gen: 0,
+            exp: 1000,
+        }
     }
 
     #[test]

@@ -41,7 +41,12 @@ impl Matchmaker {
         self.state
             .get_websockets()
             .into_iter()
-            .filter_map(|ws| ws.deserialize_attachment::<Att>().ok().flatten().map(|a| (ws, a)))
+            .filter_map(|ws| {
+                ws.deserialize_attachment::<Att>()
+                    .ok()
+                    .flatten()
+                    .map(|a| (ws, a))
+            })
             .collect()
     }
 
@@ -64,7 +69,9 @@ impl Matchmaker {
         if storage.get::<u64>(&k).await?.is_some() {
             return Ok(false);
         }
-        storage.put(&k, (c.issued_at + snow_pow::MAX_AGE_SECS) * 1000).await?;
+        storage
+            .put(&k, (c.issued_at + snow_pow::MAX_AGE_SECS) * 1000)
+            .await?;
         Ok(true)
     }
 
@@ -84,10 +91,9 @@ impl DurableObject for Matchmaker {
 
     async fn fetch(&self, req: Request) -> Result<Response> {
         let bucket = req
-            .url()?
-            .query_pairs()
-            .find(|(k, _)| k == "b")
-            .and_then(|(_, v)| v.parse::<u8>().ok())
+            .headers()
+            .get("x-snow-bucket")?
+            .and_then(|v| v.parse::<u8>().ok())
             .unwrap_or(crate::RANDOM_BUCKET);
         let pair = WebSocketPair::new()?;
         self.state.accept_web_socket(&pair.server);
@@ -98,7 +104,7 @@ impl DurableObject for Matchmaker {
             since_ms: now_ms(),
         })?;
         self.ensure_sweep_alarm().await?;
-        Response::from_websocket(pair.client)
+        upgrade_response(pair.client)
     }
 
     async fn websocket_message(&self, ws: WebSocket, msg: WebSocketIncomingMessage) -> Result<()> {
@@ -108,7 +114,9 @@ impl DurableObject for Matchmaker {
         let Some(ClientMsg::Join { pow, bucket }) = decode(msg) else {
             return Self::reject(&ws, ErrorCode::BadFrame);
         };
-        if att.status != Status::AwaitingJoin || bucket.unwrap_or(crate::RANDOM_BUCKET) != att.bucket {
+        if att.status != Status::AwaitingJoin
+            || bucket.unwrap_or(crate::RANDOM_BUCKET) != att.bucket
+        {
             return Self::reject(&ws, ErrorCode::BadFrame);
         }
         if !self.check_pow(&att, &pow).await? {
@@ -128,25 +136,53 @@ impl DurableObject for Matchmaker {
             return ws.serialize_attachment(att);
         };
 
-        let room_id = self.env.durable_object("CHATROOM")?.unique_id()?.to_string();
+        let room_id = self
+            .env
+            .durable_object("CHATROOM")?
+            .unique_id()?
+            .to_string();
         let mut room = [0u8; 32];
         hex::decode_to_slice(&room_id, &mut room).map_err(|e| Error::RustError(e.to_string()))?;
         let key = secret(&self.env, "TICKET_KEY")?;
         let exp = now_ms() + TICKET_TTL_MS;
-        let ticket = |slot| Ticket { room, slot, kind: Kind::Join, gen: 0, exp }.sign(&key);
+        let ticket = |slot| {
+            Ticket {
+                room,
+                slot,
+                kind: Kind::Join,
+                gen: 0,
+                exp,
+            }
+            .sign(&key)
+        };
 
         // The partner waited longer, so it gets slot 0 / Initiator.
-        for (sock, a, slot, role) in [(&pws, &mut patt, 0, Role::Initiator), (&ws, &mut att, 1, Role::Responder)] {
+        for (sock, a, slot, role) in [
+            (&pws, &mut patt, 0, Role::Initiator),
+            (&ws, &mut att, 1, Role::Responder),
+        ] {
             a.status = Status::Done;
             sock.serialize_attachment(*a)?;
-            send(sock, &ServerMsg::Matched { ticket: ticket(slot), role })?;
+            send(
+                sock,
+                &ServerMsg::Matched {
+                    ticket: ticket(slot),
+                    role,
+                },
+            )?;
             sock.close(Some(1000), Some("matched"))?;
         }
         event("matched");
         Ok(())
     }
 
-    async fn websocket_close(&self, _ws: WebSocket, _code: usize, _reason: String, _clean: bool) -> Result<()> {
+    async fn websocket_close(
+        &self,
+        _ws: WebSocket,
+        _code: usize,
+        _reason: String,
+        _clean: bool,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -158,7 +194,9 @@ impl DurableObject for Matchmaker {
     async fn alarm(&self) -> Result<Response> {
         let storage = self.state.storage();
         let now = now_ms();
-        let entries = storage.list_with_options(ListOptions::new().prefix("pow:")).await?;
+        let entries = storage
+            .list_with_options(ListOptions::new().prefix("pow:"))
+            .await?;
         let mut expired = Vec::new();
         for k in entries.keys() {
             let k = k?.as_string().unwrap_or_default();
@@ -176,7 +214,13 @@ impl DurableObject for Matchmaker {
                 let _ = ws.close(Some(1000), Some("timeout"));
             }
         }
-        if !socks.is_empty() || storage.list_with_options(ListOptions::new().prefix("pow:").limit(1)).await?.size() > 0 {
+        if !socks.is_empty()
+            || storage
+                .list_with_options(ListOptions::new().prefix("pow:").limit(1))
+                .await?
+                .size()
+                > 0
+        {
             storage.set_alarm(SWEEP_MS).await?;
         }
         Response::empty()
