@@ -1,0 +1,24 @@
+[package]
+name = "snow-tokens"
+description = "Unlinkable anonymous tokens (RFC 9497 VOPRF, ristretto255) for reputation and paid perks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# 0.6 pre-release: 0.5 pulls crypto-bigint 0.5 (RUSTSEC-2026-0387, timing). 0.6
+# uses crypto-bigint 0.7.11 and curve25519-dalek 5 (shared with snow-psi). Pinned
+# exactly; implements the final RFC 9497. Move to 0.6.0 when released.
+voprf = { version = "=0.6.0-pre.2", default-features = false, features = ["ristretto255-ciphersuite", "alloc"] }
+rand_core = { version = "0.10", default-features = false }
+rand_chacha = { version = "0.10", default-features = false }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+serde = { workspace = true }
+subtle = { version = "2.5", default-features = false }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+postcard = { workspace = true }

@@ -16,7 +16,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - name: snow-proto / snow-pow build for wasm
-        run: cargo build -p snow-proto -p snow-pow --target wasm32-unknown-unknown
+        run: cargo build -p snow-proto -p snow-pow -p snow-tokens --target wasm32-unknown-unknown
       - name: tor feature
         run: cargo clippy -p snow-core -p snow-cli --features snow-cli/tor --all-targets -- -D warnings
       - name: adult_tags feature (Android build)
