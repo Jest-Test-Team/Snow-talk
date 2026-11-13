@@ -209,6 +209,15 @@ pub struct SponsorCard {
     pub url: String,
 }
 
+/// Where a purchase was made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PurchaseStore {
+    /// StoreKit 2: pass `Transaction.jwsRepresentation`.
+    Apple,
+    /// Play Billing: pass the purchase token (not supported by the relay yet).
+    Google,
+}
+
 /// Feature switches from the signed remote config.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct RemoteFeatures {
@@ -237,6 +246,16 @@ pub enum CoreError {
     BadKey,
     #[error("saved session is corrupt or the key is wrong")]
     BadSavedSession,
+    #[error("network error")]
+    Network,
+    #[error("the purchase proof is not genuine")]
+    PurchaseInvalid,
+    #[error("this purchase doesn't buy VIP tokens (other app or product, refunded, or sandbox)")]
+    PurchaseNotEligible,
+    #[error("this purchase was already exchanged for tokens")]
+    PurchaseAlreadyRedeemed,
+    #[error("this store isn't supported yet")]
+    StoreUnsupported,
 }
 
 /// Implemented by the UI (Swift / Kotlin) to receive events. Called from a background thread.
@@ -468,6 +487,36 @@ impl SnowClient {
             .lock()
             .unwrap()
             .count(snow_tokens::Kind::Good, epoch)
+    }
+
+    /// VIP tokens currently spendable (paranoid mode, 24 h hold).
+    pub fn vip_tokens(&self) -> u32 {
+        let epoch = snow_tokens::epoch(engine::unix_now());
+        self.shared
+            .wallet
+            .lock()
+            .unwrap()
+            .count(snow_tokens::Kind::Vip, epoch)
+    }
+
+    /// Exchange a store purchase for blind VIP tokens; returns how many were
+    /// added. The relay learns that a purchase was made, but the tokens can't
+    /// be linked to it when spent. Call `finish()` on the store transaction
+    /// only after this succeeds (or fails with `PurchaseAlreadyRedeemed`); a
+    /// retry after a crash or network error repeats the same request.
+    pub async fn redeem_purchase(
+        &self,
+        store: PurchaseStore,
+        proof: String,
+    ) -> Result<u32, CoreError> {
+        let fut = engine::redeem_purchase(
+            self.cfg.clone(),
+            self.shared.clone(),
+            self.listener.clone(),
+            store,
+            proof,
+        );
+        self.rt.spawn(fut).await.map_err(|_| CoreError::Network)?
     }
 
     /// Serialized wallet, for the app to store in the Keychain / Keystore.

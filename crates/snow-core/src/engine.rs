@@ -160,6 +160,107 @@ fn spend_tokens(cfg: &Config, shared: &Shared, l: &dyn ChatListener) -> Vec<Vec<
         .collect()
 }
 
+/// Trade a purchase for VIP tokens (see `SnowClient::redeem_purchase`).
+pub async fn redeem_purchase(
+    cfg: Config,
+    shared: Shared,
+    l: Arc<dyn ChatListener>,
+    store: PurchaseStore,
+    proof: String,
+) -> Result<u32, CoreError> {
+    use sha2::{Digest, Sha256};
+    use snow_proto::{VipRefusal, VipRequest, VipResponse};
+    let purchase: [u8; 32] = Sha256::digest(proof.as_bytes()).into();
+    let now_epoch = snow_tokens::epoch(unix_now());
+    let (seed, epoch, created) = shared.wallet.lock().unwrap().pending(purchase, now_epoch);
+    if created {
+        // Persist the seed before anything is sent.
+        l.on_wallet_changed();
+    }
+    let (mut req, blinded) =
+        snow_tokens::request(snow_tokens::Kind::Vip, epoch, snow_tokens::MAX_BATCH, seed)
+            .expect("valid batch");
+    let body = postcard::to_allocvec(&VipRequest {
+        store: match store {
+            PurchaseStore::Apple => snow_proto::Store::Apple,
+            PurchaseStore::Google => snow_proto::Store::Google,
+        },
+        epoch,
+        proof,
+        blinded,
+    })
+    .expect("serializes");
+    let base = cfg.server_url.trim_end_matches('/');
+    let dialer = dialer(&cfg, &shared, &*l)
+        .await
+        .map_err(|_| CoreError::Network)?;
+    let netw = net::Net::new(base, &cfg.pins, dialer)
+        .await
+        .map_err(|_| CoreError::Network)?;
+    let (status, resp) = crate::http::request(
+        &netw.dialer,
+        &netw.relay,
+        "POST",
+        "/tokens/vip",
+        &[("content-type", "application/octet-stream")],
+        &body,
+    )
+    .await
+    .map_err(|_| CoreError::Network)?;
+    let resp: VipResponse = match status {
+        200 => postcard::from_bytes(&resp).map_err(|_| CoreError::Network)?,
+        _ => return Err(CoreError::Network),
+    };
+    let done = |w: &mut Wallet| w.clear_pending(&purchase);
+    match resp {
+        VipResponse::Tokens {
+            epoch: e,
+            public_key,
+            evaluated,
+            proof,
+        } => {
+            let listed = shared.remote.lock().unwrap().token_key_ok(
+                snow_config::TokenKind::Vip,
+                e,
+                &public_key,
+                unix_now(),
+            );
+            let mut w = shared.wallet.lock().unwrap();
+            if e != epoch
+                || listed == Some(false)
+                || w.pin(snow_tokens::Kind::Vip, e, public_key).is_err()
+            {
+                // A relay trying to tag this purchase. Keep the seed: nothing
+                // better can come of a retry, but don't pretend it worked.
+                return Err(CoreError::PurchaseInvalid);
+            }
+            let mut p = [0u8; 64];
+            p[..32].copy_from_slice(&proof[0]);
+            p[32..].copy_from_slice(&proof[1]);
+            req.truncate(evaluated.len());
+            let tokens = req
+                .finish(&public_key, &evaluated, &p)
+                .map_err(|_| CoreError::PurchaseInvalid)?;
+            let n = tokens.len() as u32;
+            w.add(tokens);
+            done(&mut w);
+            drop(w);
+            l.on_wallet_changed();
+            Ok(n)
+        }
+        VipResponse::Refused(r) => {
+            done(&mut shared.wallet.lock().unwrap());
+            l.on_wallet_changed();
+            Err(match r {
+                VipRefusal::Invalid => CoreError::PurchaseInvalid,
+                VipRefusal::NotEligible => CoreError::PurchaseNotEligible,
+                VipRefusal::AlreadyRedeemed => CoreError::PurchaseAlreadyRedeemed,
+                VipRefusal::Unsupported => CoreError::StoreUnsupported,
+            })
+        }
+    }
+}
+
 /// One VIP token for a room hold, if the wallet has one (else the room decides
 /// by policy).
 fn take_vip(shared: &Shared, l: &dyn ChatListener) -> Vec<Vec<u8>> {

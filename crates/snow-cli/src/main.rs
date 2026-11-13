@@ -3,6 +3,7 @@
 //! ```text
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
+//! snow-cli iap-test-chain --iap-chain DIR        # test CA for the `vip` scenario
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
 //!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|safety|goodchat|report|trusted|grace]
 //!                    [--tag TEXT]... [--nick NAME]
@@ -37,6 +38,9 @@
 //! * `extend`    — A extends the room (VIP; relay with `EXTEND_GRANT=open`),
 //!   saves the session and quits; the room outlives the normal grace period; a
 //!   brand-new client resumes from the sealed blob and the chat continues
+//! * `vip`       — with `--iap-chain DIR` (from `snow-cli iap-test-chain DIR`,
+//!   relay built with `e2e-test-root`): an App Store purchase buys blind VIP
+//!   tokens once; a replay, a forgery and a foreign product are refused
 //! * `config-tagging` — the config pins issuer keys the relay doesn't use (as a
 //!   relay tagging users with its own keys would): tokens must be refused
 use snow_core::*;
@@ -122,6 +126,7 @@ struct Args {
     pins: Vec<String>,
     tor_dir: Option<String>,
     config_key: Option<String>,
+    iap_chain: Option<String>,
 }
 
 fn args() -> Args {
@@ -141,6 +146,7 @@ fn args() -> Args {
         pins: Vec::new(),
         tor_dir: None,
         config_key: None,
+        iap_chain: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -164,6 +170,7 @@ fn args() -> Args {
             "--tor" => a.tor_dir = Some(it.next().expect("--tor DIR")),
             "--pin" => a.pins.push(it.next().expect("--pin BASE64")),
             "--paranoid" => a.paranoid = true,
+            "--iap-chain" => a.iap_chain = Some(it.next().expect("--iap-chain DIR")),
             "--config-key" => a.config_key = Some(it.next().expect("--config-key HEX")),
             "--tag" => a.tags.push(it.next().expect("--tag TEXT")),
             "--nick" => a.nick = Some(it.next().expect("--nick NAME")),
@@ -219,6 +226,17 @@ fn main() {
                 std::process::exit(1)
             }
         },
+        "iap-test-chain" => iap::write_chain(a.iap_chain.as_deref().expect("--iap-chain DIR")),
+        "pair-test" if a.scenario == "vip" => std::process::exit(match iap::vip(&a) {
+            Ok(()) => {
+                println!("PASS");
+                0
+            }
+            Err(e) => {
+                eprintln!("FAIL: {e}");
+                1
+            }
+        }),
         "pair-test" => std::process::exit(match pair_test(&a) {
             Ok(()) => {
                 println!("PASS");
@@ -897,6 +915,142 @@ impl Pair<'_> {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+/// Test App Store chain (P-384 root and intermediate, P-256 leaf, Apple's
+/// marker OIDs) and StoreKit-2-shaped signed transactions.
+mod iap {
+    use super::*;
+    use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+    use base64::Engine;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CustomExtension, IsCa, Issuer, KeyPair,
+        PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384,
+    };
+
+    fn params(name: &str, oid: Option<&[u64]>, ca: bool) -> CertificateParams {
+        let mut p = CertificateParams::new(Vec::<String>::new()).expect("params");
+        p.distinguished_name.push(rcgen::DnType::CommonName, name);
+        p.is_ca = if ca {
+            IsCa::Ca(BasicConstraints::Unconstrained)
+        } else {
+            IsCa::NoCa
+        };
+        if let Some(oid) = oid {
+            p.custom_extensions
+                .push(CustomExtension::from_oid_content(oid, vec![5, 0]));
+        }
+        p
+    }
+
+    /// `snow-cli iap-test-chain --iap-chain DIR`
+    pub fn write_chain(dir: &str) {
+        let root_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).expect("key");
+        let root_p = params("E2E Test Root", None, true);
+        let root = root_p.self_signed(&root_key).expect("root");
+        let inter_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).expect("key");
+        let inter_p = params(
+            "E2E Test WWDR",
+            Some(&[1, 2, 840, 113635, 100, 6, 2, 1]),
+            true,
+        );
+        let inter = inter_p
+            .signed_by(&inter_key, &Issuer::from_params(&root_p, &root_key))
+            .expect("inter");
+        let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("key");
+        let leaf = params(
+            "E2E Test Leaf",
+            Some(&[1, 2, 840, 113635, 100, 6, 11, 1]),
+            false,
+        )
+        .signed_by(&leaf_key, &Issuer::from_params(&inter_p, &inter_key))
+        .expect("leaf");
+        let x5c: Vec<String> = [leaf.der(), inter.der(), root.der()]
+            .iter()
+            .map(|d| STANDARD.encode(d))
+            .collect();
+        let w = |f: &str, b: &[u8]| std::fs::write(format!("{dir}/{f}"), b).expect("write");
+        w("root.b64", STANDARD.encode(root.der()).as_bytes());
+        w(
+            "x5c.json",
+            serde_json::to_string(&x5c).expect("json").as_bytes(),
+        );
+        w("leaf.pk8", &leaf_key.serialize_der());
+    }
+
+    fn sign(dir: &str, product: &str, tx: &str) -> String {
+        use p256::ecdsa::signature::Signer;
+        use p256::pkcs8::DecodePrivateKey;
+        let x5c: Vec<String> =
+            serde_json::from_slice(&std::fs::read(format!("{dir}/x5c.json")).expect("x5c"))
+                .expect("x5c json");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis();
+        let header = serde_json::json!({ "alg": "ES256", "x5c": x5c }).to_string();
+        let payload = serde_json::json!({
+            "transactionId": tx, "originalTransactionId": tx,
+            "bundleId": "app.snowtalk.ios", "productId": product,
+            "purchaseDate": now, "quantity": 1, "type": "Consumable",
+            "environment": "Sandbox", "signedDate": now,
+        })
+        .to_string();
+        let msg = format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(header),
+            URL_SAFE_NO_PAD.encode(payload)
+        );
+        let key = p256::ecdsa::SigningKey::from_pkcs8_der(
+            &std::fs::read(format!("{dir}/leaf.pk8")).expect("leaf key"),
+        )
+        .expect("pkcs8");
+        let sig: p256::ecdsa::Signature = key.sign(msg.as_bytes());
+        format!("{msg}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))
+    }
+
+    pub fn vip(a: &Args) -> Result<(), String> {
+        let dir = a.iap_chain.as_deref().ok_or("needs --iap-chain DIR")?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .map_err(|e| e.to_string())?;
+        let (c, rx) = client(a);
+        let tx = format!("e2e-{}", std::process::id());
+        let redeem = |proof: String| rt.block_on(c.redeem_purchase(PurchaseStore::Apple, proof));
+        let n = redeem(sign(dir, "vip_5", &tx)).map_err(|e| format!("redeem: {e}"))?;
+        if n != 5 || c.vip_tokens() != 5 {
+            return Err(format!("bought {n}, wallet has {}", c.vip_tokens()));
+        }
+        wallet_event(&rx, "wallet saved")?;
+        let checks = [
+            (
+                sign(dir, "vip_5", &tx),
+                "replayed purchase",
+                CoreError::PurchaseAlreadyRedeemed,
+            ),
+            (
+                sign(dir, "coins", &format!("{tx}-b")),
+                "foreign product",
+                CoreError::PurchaseNotEligible,
+            ),
+            (
+                sign(dir, "vip_5", &format!("{tx}-c")).replace('.', ".x"),
+                "forgery",
+                CoreError::PurchaseInvalid,
+            ),
+        ];
+        for (proof, what, want) in checks {
+            match redeem(proof) {
+                Err(e) if std::mem::discriminant(&e) == std::mem::discriminant(&want) => {}
+                other => return Err(format!("{what}: expected {want:?}, got {other:?}")),
+            }
+        }
+        if c.vip_tokens() != 5 {
+            return Err("refused purchases changed the wallet".into());
+        }
+        println!("purchase → 5 blind VIP tokens; replay, foreign product and forgery refused");
         Ok(())
     }
 }

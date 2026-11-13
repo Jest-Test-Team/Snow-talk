@@ -19,6 +19,11 @@ pub struct Wallet {
     /// same epoch would mean the server is trying to tag us: refused.
     keys: BTreeMap<(u8, u32), [u8; 32]>,
     tokens: Vec<Token>,
+    /// Purchases being exchanged for VIP tokens: `sha256(proof) → (seed, epoch)`.
+    /// Saved before the request is sent, so after a crash or a lost response
+    /// the exact same (blinded) request can be repeated; the relay only answers
+    /// a purchase's first request.
+    pending: BTreeMap<[u8; 32], ([u8; 32], u32)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -81,6 +86,25 @@ impl Wallet {
         Some(chosen.into_iter().map(|i| self.tokens.remove(i)).collect())
     }
 
+    /// The request seed and epoch for a purchase, creating them on first use.
+    /// Returns `(seed, epoch, created)`.
+    pub fn pending(&mut self, purchase: [u8; 32], now_epoch: u32) -> ([u8; 32], u32, bool) {
+        if let Some((seed, epoch)) = self.pending.get(&purchase) {
+            if snow_tokens::is_current(*epoch, now_epoch) {
+                return (*seed, *epoch, false);
+            }
+        }
+        use rand::RngCore;
+        let mut seed = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+        self.pending.insert(purchase, (seed, now_epoch));
+        (seed, now_epoch, true)
+    }
+
+    pub fn clear_pending(&mut self, purchase: &[u8; 32]) {
+        self.pending.remove(purchase);
+    }
+
     pub fn export(&self) -> Vec<u8> {
         postcard::to_allocvec(self).expect("wallet serializes")
     }
@@ -128,7 +152,16 @@ mod tests {
         assert_eq!(t[0].epoch, 9);
         assert_eq!(w.count(Kind::Good, 10), 1);
         assert_eq!(w.count(Kind::Vip, 10), 1);
+        let (s1, e1, new1) = w.pending([7; 32], 10);
+        let (s2, e2, new2) = w.pending([7; 32], 11);
+        assert!(
+            new1 && !new2 && s1 == s2 && e1 == e2,
+            "same request after restart"
+        );
+        let (s3, _, new3) = w.pending([7; 32], 12);
+        assert!(new3 && s3 != s1, "stale epoch → fresh request");
         let back = Wallet::import(&w.export()).unwrap();
+        assert_eq!(back.pending.get(&[7; 32]).map(|p| p.0), Some(s3));
         assert_eq!(back.count(Kind::Good, 10), 1);
         assert!(Wallet::import(b"\xff\xff").is_none());
     }

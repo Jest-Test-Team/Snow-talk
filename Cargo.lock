@@ -379,6 +379,12 @@ checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
 name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
@@ -1450,6 +1456,7 @@ dependencies = [
  "ff 0.13.1",
  "generic-array",
  "group 0.13.0",
+ "pem-rfc7468",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
  "sec1 0.7.3",
@@ -3077,7 +3084,7 @@ version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "serde_core",
 ]
 
@@ -4017,7 +4024,7 @@ version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df9adc193c780ef8f159aee8b61e2d5801aaa555e6eb0947fe45530ec506296f"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "bs58",
  "chrono",
  "hex",
@@ -4227,8 +4234,13 @@ checksum = "e8e2fb0f499abb4d162f2bedad68f5ef91a1682b5a03596ddb67efd37768d100"
 name = "snow-cli"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "image",
+ "p256",
+ "rcgen",
+ "serde_json",
  "snow-core",
+ "tokio",
 ]
 
 [[package]]
@@ -4252,7 +4264,7 @@ name = "snow-core"
 version = "0.1.0"
 dependencies = [
  "arti-client",
- "base64",
+ "base64 0.23.1",
  "chacha20poly1305",
  "futures-util",
  "hex",
@@ -6161,7 +6173,7 @@ checksum = "cafdb6875115a436251b280d741286a9cec7fc4daab0588ea26481dd8e2bab2f"
 dependencies = [
  "aes",
  "arrayvec",
- "base64",
+ "base64 0.23.1",
  "base64ct",
  "cbc",
  "chacha20poly1305",

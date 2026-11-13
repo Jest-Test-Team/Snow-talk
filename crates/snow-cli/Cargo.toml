@@ -9,6 +9,12 @@ description = "Terminal client and end-to-end test bot built on snow-core."
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 snow-core.workspace = true
+# `vip` scenario: an Apple-shaped test certificate chain and signed transaction.
+rcgen = "0.14"
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+base64 = "0.22"
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
 
 [features]
 tor = ["snow-core/tor"]
