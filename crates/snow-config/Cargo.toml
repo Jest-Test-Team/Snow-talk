@@ -1,0 +1,20 @@
+[package]
+name = "snow-config"
+description = "Signed remote config and sponsored-tag catalog for Snow-talk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ed25519-dalek = { version = "3", default-features = false, features = ["zeroize"] }
+serde = { workspace = true, features = ["std"] }
+serde_json = "1.0.154"
+sha2 = { workspace = true }
+hex = "0.4.3"
+thiserror = { workspace = true }
+snow-psi = { path = "../snow-psi" }
+
+[dev-dependencies]
+rand = { workspace = true }

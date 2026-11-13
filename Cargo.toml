@@ -8,6 +8,7 @@ members = [
     "crates/snow-media",
     "crates/snow-safety",
     "crates/snow-tokens",
+    "crates/snow-config",
     "crates/snow-core",
     "crates/snow-cli",
 ]
