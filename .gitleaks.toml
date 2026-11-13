@@ -1,0 +1,7 @@
+# Default gitleaks rules, plus one narrow allowlist.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Vendored SQLite amalgamation: API names like sqlite3_api->... and iKey trip generic-api-key"
+paths = ['''^vendor/libsqlite3-sys/(sqlite3|sqlcipher)/''']
