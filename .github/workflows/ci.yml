@@ -28,6 +28,9 @@ jobs:
       - name: server check
         working-directory: server
         run: cargo check --target wasm32-unknown-unknown
+      - name: server tests (tickets, App Store verification)
+        working-directory: server
+        run: cargo test
   deny:
     runs-on: ubuntu-latest
     steps:
@@ -35,3 +38,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --all-features
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: server/Cargo.toml
+          command: check advisories bans sources
