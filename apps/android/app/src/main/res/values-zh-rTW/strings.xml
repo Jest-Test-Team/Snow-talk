@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="tagline">匿名、端對端加密地和陌生人聊天。什麼都不保存。</string>
+    <string name="nickname">暱稱（選填）</string>
+    <string name="tags">興趣標籤（選填）</string>
+    <string name="tags_hint">用逗號分隔。配對後只會私下比對共同的標籤。</string>
+    <string name="advanced">伺服器設定</string>
+    <string name="server">中繼伺服器網址</string>
+    <string name="start">開始配對</string>
+    <string name="next">換下一位</string>
+    <string name="home">回首頁</string>
+    <string name="cancel">取消</string>
+    <string name="ok">好</string>
+    <string name="good_tokens">好寶寶 token：%1$d</string>
+    <string name="state_tor">透過 Tor 連線中…</string>
+    <string name="state_pow">防機器人驗證中…</string>
+    <string name="state_queued">配對中…</string>
+    <string name="state_handshake">建立加密連線…</string>
+    <string name="sponsored">贊助</string>
+    <string name="stranger">陌生人</string>
+    <string name="sas">驗證碼：%1$s</string>
+    <string name="report">檢舉</string>
+    <string name="report_confirm">要檢舉並離開嗎？不會傳送任何對話內容，只是對方這次拿不到好寶寶 token。</string>
+    <string name="leave">離開</string>
+    <string name="type">輸入訊息</string>
+    <string name="send">送出</string>
+    <string name="reconnecting">重新連線中… %1$d 秒</string>
+    <string name="peer_away">對方連線中斷，等待重連 %1$d 秒…</string>
+    <string name="peer_saved">這段對話會保留 24 小時。對方可能在裝置上保存了加密的副本。</string>
+    <string name="common_tags">你們都喜歡：%1$s</string>
+    <string name="blurred">此訊息可能含有不當內容，點擊以檢視。</string>
+    <string name="caution">⚠ 對方可能想引導你到其他平台／談錢</string>
+    <string name="end_self">你已離開對話。</string>
+    <string name="end_peer_left">對方已離開對話。</string>
+    <string name="end_peer_gone">對方已斷線。</string>
+    <string name="end_cancelled">已取消配對。</string>
+    <string name="end_lost">連線中斷。</string>
+    <string name="end_no_common">沒有共同興趣，再找下一位同好吧。</string>
+    <string name="end_reported">已檢舉，謝謝你讓這裡更安全。</string>
+    <string name="end_error">發生錯誤：%1$s</string>
+    <string name="error_server">請在「伺服器設定」填入中繼伺服器網址（http:// 或 https://）。</string>
+</resources>

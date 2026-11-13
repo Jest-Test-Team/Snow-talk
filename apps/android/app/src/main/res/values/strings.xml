@@ -1,4 +1,43 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Snow-talk</string>
+    <string name="tagline">Anonymous, end-to-end encrypted chats with strangers. Nothing is stored.</string>
+    <string name="nickname">Nickname (optional)</string>
+    <string name="tags">Interests (optional)</string>
+    <string name="tags_hint">Comma-separated. Compared privately with your match.</string>
+    <string name="advanced">Server settings</string>
+    <string name="server">Relay server URL</string>
+    <string name="start">Find someone</string>
+    <string name="next">Find someone else</string>
+    <string name="home">Home</string>
+    <string name="cancel">Cancel</string>
+    <string name="ok">OK</string>
+    <string name="good_tokens">Good-chat tokens: %1$d</string>
+    <string name="state_tor">Connecting through Tor…</string>
+    <string name="state_pow">Proving you\'re not a bot…</string>
+    <string name="state_queued">Looking for someone…</string>
+    <string name="state_handshake">Setting up encryption…</string>
+    <string name="sponsored">Sponsored</string>
+    <string name="stranger">Stranger</string>
+    <string name="sas">Verify: %1$s</string>
+    <string name="report">Report</string>
+    <string name="report_confirm">Report this person and leave? Nothing you wrote is sent; they just won\'t earn a good-chat token.</string>
+    <string name="leave">Leave</string>
+    <string name="type">Message</string>
+    <string name="send">Send</string>
+    <string name="reconnecting">Reconnecting… %1$ds</string>
+    <string name="peer_away">The other person lost connection. Waiting %1$ds…</string>
+    <string name="peer_saved">This chat is held for 24 h. The other person may keep an encrypted copy on their device.</string>
+    <string name="common_tags">You both like: %1$s</string>
+    <string name="blurred">This message may contain inappropriate content. Tap to view.</string>
+    <string name="caution">⚠ May be trying to move you off-platform or talk money</string>
+    <string name="end_self">You left the chat.</string>
+    <string name="end_peer_left">The other person left the chat.</string>
+    <string name="end_peer_gone">The other person disconnected.</string>
+    <string name="end_cancelled">Search cancelled.</string>
+    <string name="end_lost">Connection lost.</string>
+    <string name="end_no_common">No shared interests. Try again to find someone else.</string>
+    <string name="end_reported">Reported. Thanks for keeping this place safe.</string>
+    <string name="end_error">Something went wrong: %1$s</string>
+    <string name="error_server">Set a relay server URL (http:// or https://) under Server settings.</string>
 </resources>

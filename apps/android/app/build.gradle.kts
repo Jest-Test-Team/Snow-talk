@@ -19,6 +19,8 @@ android {
         targetSdk = 35
         versionCode = (System.getenv("SNOW_VERSION_CODE") ?: "1").toInt()
         versionName = System.getenv("SNOW_VERSION_NAME") ?: "0.1.0"
+        // Default relay; users can change it on the home screen.
+        buildConfigField("String", "SNOW_SERVER_URL", "\"${System.getenv("SNOW_SERVER_URL") ?: ""}\"")
     }
 
     signingConfigs {
@@ -48,7 +50,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
     // Reproducible-ish APKs: no build timestamps or VCS info baked in.
     dependenciesInfo {
         includeInApk = false
@@ -60,6 +65,8 @@ dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.compose.material3:material3")
     implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     // UniFFI bindings: JNA to load libsnow_core.so, coroutines for async calls.
     implementation("net.java.dev.jna:jna:5.15.0@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
