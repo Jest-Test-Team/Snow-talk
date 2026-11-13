@@ -64,3 +64,11 @@ dependencies {
     implementation("net.java.dev.jna:jna:5.15.0@aar")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
+
+// SBOM of exactly what ships in the APK (other configurations don't resolve
+// unambiguously and aren't part of the product).
+tasks.named<org.cyclonedx.gradle.CycloneDxTask>("cyclonedxBom") {
+    setIncludeConfigs(listOf("releaseRuntimeClasspath"))
+    setProjectType("application")
+    setOutputFormat("json")
+}
