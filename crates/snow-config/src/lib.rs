@@ -88,6 +88,8 @@ pub struct Features {
     pub voice: bool,
     /// Flash photos.
     pub photos: bool,
+    /// Show the in-app purchase UI. Off during the free beta.
+    pub iap: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

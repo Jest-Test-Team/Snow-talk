@@ -10,13 +10,15 @@ command = "worker-build --release $SNOW_BUILD_ARGS"
 POW_DIFFICULTY = "23"
 # Paranoid mode (constant cover traffic) keeps rooms from hibernating, so it is a
 # VIP perk. "open" = grant to anyone (dev/beta); anything else = token required.
-PARANOID_GRANT = "token"
+# Beta (2026-11): every perk is free while we test and grow. Set back to
+# "token" to charge VIP tokens again.
+PARANOID_GRANT = "open"
 # Good-chat tokens needed for the trusted queue, and how long a trusted waiter
 # is reserved for other trusted users before anyone may be matched with them.
 TRUSTED_MIN = "3"
 TRUSTED_EXCLUSIVE_SECS = "30"
 # 24 h room hold (saved sessions): "open" = anyone (dev); else one VIP token.
-EXTEND_GRANT = "token"
+EXTEND_GRANT = "open"
 # App Store products that buy VIP tokens: "product_id:tokens,..." (≤ 16 each).
 APPLE_BUNDLE_ID = "app.snowtalk.ios"
 APPLE_PRODUCTS = ""

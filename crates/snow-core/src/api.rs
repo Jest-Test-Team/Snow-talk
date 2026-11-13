@@ -226,6 +226,8 @@ pub struct RemoteFeatures {
     pub lightning: bool,
     pub voice: bool,
     pub photos: bool,
+    /// Show purchase screens (off during the free beta).
+    pub iap: bool,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -541,6 +543,7 @@ impl SnowClient {
             lightning: c.features.lightning,
             voice: c.features.voice,
             photos: c.features.photos,
+            iap: c.features.iap,
         })
     }
 
