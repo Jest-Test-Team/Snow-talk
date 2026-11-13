@@ -1,10 +1,13 @@
 //! The per-chat async task: PoW → queue → room → handshake → chat.
 use crate::api::*;
+use crate::interests;
 use crate::net::{self, NetError, Ws};
 use crate::pacer::{Item, Out, Pacer};
 use crate::transcript::Transcript;
 use snow_crypto::{ChatSession, CryptoError, Handshaker, Step};
 use snow_proto::{ClientMsg, ErrorCode, Handshake, Inner, PeerEnvelope, Role, ServerMsg};
+use snow_psi::Psi;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -116,7 +119,10 @@ async fn run_inner(
     shared: Shared,
 ) -> Result<EndReason, EngineError> {
     let base = cfg.server_url.trim_end_matches('/');
-    let bucket = cfg.bucket.unwrap_or(255);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let bucket = interests::bucket(cfg, now);
 
     // 1. Proof of work.
     l.on_state(ChatState::SolvingPow);
@@ -133,7 +139,7 @@ async fn run_inner(
     let mut mm = Ws::connect(&netw, "/match", &format!("b.{bucket}")).await?;
     mm.send(&ClientMsg::Join {
         pow: snow_proto::PowSolution { challenge, nonce },
-        bucket: cfg.bucket,
+        bucket: (bucket != interests::RANDOM_BUCKET).then_some(bucket),
         paranoid: cfg.paranoid,
     })
     .await?;
@@ -158,7 +164,7 @@ async fn run_inner(
     l.on_state(ChatState::Handshaking { paranoid });
     let room_url = "/room";
     let (mut room, mut resume, peer_present) = join_room(&netw, room_url, &ticket).await?;
-    let mut chat = Chat::new(role, shared.clone());
+    let mut chat = Chat::new(role, shared.clone(), cfg);
     if peer_present {
         chat.send_commit(&mut room).await?;
     }
@@ -170,6 +176,11 @@ async fn run_inner(
     let mut foreground = true;
 
     loop {
+        // Protocol messages the chat wants to send (PSI, profile) go through the
+        // pacer like everything else.
+        while let Some(i) = chat.outgoing.pop_front() {
+            pacer.push(Item::Control(i));
+        }
         // Anything typed while we were reconnecting goes back into the queue.
         for c in std::mem::take(&mut outbox) {
             match c {
@@ -233,6 +244,11 @@ async fn run_inner(
                 Some(Cmd::Wipe) | None => { room.close().await; return Ok(EndReason::Wiped) }
             },
         };
+        if let Some(end) = chat.ending.take() {
+            let _ = room.send(&ClientMsg::Leave).await;
+            room.close().await;
+            return Ok(end);
+        }
         if lost {
             match reconnect(&netw, room_url, &mut resume, cmds, &mut outbox, l).await? {
                 Reconnect::Joined(ws) => {
@@ -332,18 +348,33 @@ struct Chat {
     /// False while the room reports the peer as disconnected (no point sending cover traffic).
     peer_online: bool,
     shared: Shared,
+    /// Normalized tags for the PSI (empty = we don't care about interests).
+    tags: Vec<String>,
+    require_common_tag: bool,
+    profile: Option<snow_proto::Profile>,
+    psi: Option<Psi>,
+    /// Encrypted control messages waiting for the pacer.
+    outgoing: VecDeque<Inner>,
+    /// Set when the chat decides to end itself (e.g. no common tags).
+    ending: Option<EndReason>,
     commit: Option<Handshake>,
     hs: Option<Handshaker>,
     session: Option<ChatSession>,
 }
 
 impl Chat {
-    fn new(role: Role, shared: Shared) -> Self {
+    fn new(role: Role, shared: Shared, cfg: &Config) -> Self {
         let (hs, commit) = Handshaker::new(role);
         Self {
             role,
             peer_online: true,
             shared,
+            tags: interests::psi_tags(cfg),
+            require_common_tag: cfg.require_common_tag,
+            profile: cfg.profile.as_ref().map(interests::to_wire),
+            psi: None,
+            outgoing: VecDeque::new(),
+            ending: None,
             commit: Some(commit),
             hs: Some(hs),
             session: None,
@@ -446,6 +477,64 @@ impl Chat {
         l.on_sas(s.sas().emoji().iter().map(|e| e.to_string()).collect());
         l.on_state(ChatState::Chatting);
         self.session = Some(s);
+        if !self.tags.is_empty() {
+            self.start_psi();
+        }
+        if let Some(p) = self.profile.take() {
+            self.outgoing.push_back(Inner::Profile(p));
+        }
+    }
+
+    fn start_psi(&mut self) {
+        if self.psi.is_none() {
+            let (psi, round1) = Psi::new(&self.tags);
+            self.psi = Some(psi);
+            self.outgoing.push_back(Inner::PsiRound1(round1));
+        }
+    }
+
+    /// A decrypted peer message.
+    fn on_inner(&mut self, inner: Inner, l: &dyn ChatListener) {
+        match inner {
+            Inner::Text { id, body, ttl_secs } => {
+                let body = Zeroizing::new(body);
+                let msg = ChatMessage {
+                    id,
+                    from_me: false,
+                    body: body.to_string(),
+                    ttl_secs,
+                };
+                self.shared
+                    .transcript
+                    .lock()
+                    .unwrap()
+                    .push(id, false, body, ttl_secs);
+                l.on_message(msg);
+            }
+            Inner::ScreenCaptured => l.on_peer(PeerEvent::ScreenCaptured),
+            Inner::PsiRound1(points) => {
+                // Answer even if we have no tags (we then send only padding), so
+                // the peer's run always completes and our tag count stays hidden.
+                self.start_psi();
+                let psi = self.psi.as_mut().expect("just started");
+                if let Ok(round2) = psi.respond(&points) {
+                    self.outgoing.push_back(Inner::PsiRound2(round2));
+                }
+            }
+            Inner::PsiRound2(points) => {
+                let Some(common) = self.psi.as_ref().and_then(|p| p.finish(&points).ok()) else {
+                    return;
+                };
+                self.psi = None;
+                let none = common.is_empty();
+                l.on_common_tags(common);
+                if none && self.require_common_tag && !self.tags.is_empty() {
+                    self.ending = Some(EndReason::NoCommonTags);
+                }
+            }
+            Inner::Profile(p) => l.on_profile(interests::from_wire(p)),
+            Inner::Chaff | Inner::Ready | Inner::Ext { .. } => {}
+        }
     }
 
     async fn on_envelope(
@@ -482,27 +571,9 @@ impl Chat {
                     }
                     None => return Err(EngineError::Protocol),
                 };
-                handle_inner(inner, &self.shared.transcript, l);
+                self.on_inner(inner, l);
             }
         }
         Ok(())
-    }
-}
-
-fn handle_inner(inner: Inner, transcript: &std::sync::Mutex<Transcript>, l: &dyn ChatListener) {
-    match inner {
-        Inner::Text { id, body, ttl_secs } => {
-            let body = Zeroizing::new(body);
-            let msg = ChatMessage {
-                id,
-                from_me: false,
-                body: body.to_string(),
-                ttl_secs,
-            };
-            transcript.lock().unwrap().push(id, false, body, ttl_secs);
-            l.on_message(msg);
-        }
-        Inner::ScreenCaptured => l.on_peer(PeerEvent::ScreenCaptured),
-        Inner::Chaff | Inner::Ready | Inner::Ext { .. } => {}
     }
 }

@@ -4,7 +4,8 @@
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
-//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|grace]
+//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|grace]
+//!                    [--tag TEXT]... [--nick NAME]
 //!                    [--paranoid] [--chaff MS]
 //! ```
 //! `pair-test` runs two clients in one process, pairs them, exchanges messages in
@@ -19,6 +20,8 @@
 //! * `flood`     — a client bypassing its pacer must be rate-limited by the room
 //! * `burn`      — a 2 s burn-after-reading message vanishes on both sides, and
 //!   a screenshot notice reaches the peer
+//! * `tags`      — PSI finds exactly the shared tags on both sides; profiles arrive
+//! * `disjoint`  — same bucket, no shared tags: both leave with `NoCommonTags`
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
@@ -34,6 +37,8 @@ enum Ev {
     Msg(ChatMessage),
     Peer(PeerEvent),
     Burn(u64, bool),
+    Common(Vec<String>),
+    Profile(UserProfile),
 }
 
 struct Chan(Sender<Ev>);
@@ -53,6 +58,12 @@ impl ChatListener for Chan {
     fn on_burn(&self, id: u64, from_me: bool) {
         let _ = self.0.send(Ev::Burn(id, from_me));
     }
+    fn on_common_tags(&self, tags: Vec<String>) {
+        let _ = self.0.send(Ev::Common(tags));
+    }
+    fn on_profile(&self, p: UserProfile) {
+        let _ = self.0.send(Ev::Profile(p));
+    }
 }
 
 #[derive(Clone)]
@@ -66,6 +77,8 @@ struct Args {
     rotation_secs: Option<u32>,
     chaff_ms: Option<u32>,
     paranoid: bool,
+    tags: Vec<String>,
+    nick: Option<String>,
     pins: Vec<String>,
     tor_dir: Option<String>,
 }
@@ -81,6 +94,8 @@ fn args() -> Args {
         rotation_secs: None,
         chaff_ms: None,
         paranoid: false,
+        tags: Vec::new(),
+        nick: None,
         pins: Vec::new(),
         tor_dir: None,
     };
@@ -106,6 +121,8 @@ fn args() -> Args {
             "--tor" => a.tor_dir = Some(it.next().expect("--tor DIR")),
             "--pin" => a.pins.push(it.next().expect("--pin BASE64")),
             "--paranoid" => a.paranoid = true,
+            "--tag" => a.tags.push(it.next().expect("--tag TEXT")),
+            "--nick" => a.nick = Some(it.next().expect("--nick NAME")),
             "--chaff" => {
                 a.chaff_ms = Some(it.next().and_then(|v| v.parse().ok()).expect("--chaff MS"))
             }
@@ -129,6 +146,14 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
             rotation_secs: a.rotation_secs,
             chaff_ms: a.chaff_ms,
             paranoid: a.paranoid,
+            tags: a.tags.clone(),
+            adult_tags: Vec::new(),
+            require_common_tag: true,
+            profile: a.nick.clone().map(|n| UserProfile {
+                nickname: Some(n),
+                mbti: Some("INTJ".into()),
+                ..Default::default()
+            }),
             pins: a.pins.clone(),
             tor_dir: a.tor_dir.clone(),
         },
@@ -177,6 +202,9 @@ fn chat(a: &Args) {
                 Ev::Msg(m) => println!("< {}", m.body),
                 Ev::Peer(p) => println!("* peer: {p:?}"),
                 Ev::Burn(id, mine) => println!("* burned #{id} (mine: {mine})"),
+                Ev::Common(t) if t.is_empty() => println!("* no interests in common"),
+                Ev::Common(t) => println!("* you both like: {}", t.join(", ")),
+                Ev::Profile(p) => println!("* peer profile: {p:?}"),
             }
         }
     });
@@ -226,8 +254,26 @@ fn pair_test(a: &Args) -> Result<(), String> {
         a2.paranoid = true;
         a2.chaff_ms = a.chaff_ms.or(Some(250));
     }
+    let mut b2 = a2.clone();
+    match a.scenario.as_str() {
+        "tags" => {
+            // Same primary tag (→ same bucket) after normalization; one more shared.
+            a2.tags = ["cats", "jazz", "hiking"].map(String::from).to_vec();
+            b2.tags = ["Cats", "chess", "#Hiking"].map(String::from).to_vec();
+            a2.nick = Some("雪人".into());
+            b2.nick = Some("Bob".into());
+        }
+        "disjoint" => {
+            // Forced into one bucket, but nothing in common.
+            a2.bucket = Some(9);
+            b2.bucket = Some(9);
+            a2.tags = vec!["cats".into()];
+            b2.tags = vec!["dogs".into()];
+        }
+        _ => {}
+    }
     let (ca, ra) = client(&a2);
-    let (cb, rb) = client(&a2);
+    let (cb, rb) = client(&b2);
     let t0 = Instant::now();
     ca.start_match();
     cb.start_match();
@@ -263,7 +309,10 @@ fn pair_test(a: &Args) -> Result<(), String> {
         rb: &rb,
         marker: &a.marker,
     };
-    pair.exchange(a.messages, "warmup")?;
+    // `wait` discards unrelated events, so PSI/profile scenarios skip the warmup.
+    if !matches!(a.scenario.as_str(), "tags" | "disjoint") {
+        pair.exchange(a.messages, "warmup")?;
+    }
 
     match a.scenario.as_str() {
         "basic" => {
@@ -394,6 +443,48 @@ fn pair_test(a: &Args) -> Result<(), String> {
             })?;
             println!("screenshot notice delivered");
         }
+        "tags" => {
+            let want = vec!["cats".to_string(), "hiking".to_string()];
+            for (rx, who, peer_nick) in [(&ra, "A", "Bob"), (&rb, "B", "雪人")] {
+                // The profile and the PSI result may arrive in either order.
+                let (mut common, mut profile) = (None, None);
+                while common.is_none() || profile.is_none() {
+                    match wait(rx, "common tags + profile", |ev| match ev {
+                        Ev::Common(_) | Ev::Profile(_) => Some(ev_clone(ev)),
+                        _ => None,
+                    })? {
+                        Ev::Common(t) => common = Some(t),
+                        Ev::Profile(p) => profile = Some(p),
+                        _ => unreachable!(),
+                    }
+                }
+                let (common, p) = (common.unwrap(), profile.unwrap());
+                if common != want {
+                    return Err(format!("{who}: common tags {common:?}, want {want:?}"));
+                }
+                if p.nickname.as_deref() != Some(peer_nick) || p.adult_ok {
+                    return Err(format!("{who}: bad peer profile {p:?}"));
+                }
+            }
+            println!("both sides found {want:?} privately; profiles exchanged");
+            pair.exchange(a.messages, "after-psi")?;
+        }
+        "disjoint" => {
+            for (rx, who) in [(&ra, "A"), (&rb, "B")] {
+                wait(rx, "no common tags", |ev| match ev {
+                    Ev::State(ChatState::Ended {
+                        reason: EndReason::NoCommonTags,
+                    }) => Some(()),
+                    // The peer may leave first: that's fine too.
+                    Ev::State(ChatState::Ended {
+                        reason: EndReason::PeerLeft,
+                    }) => Some(()),
+                    _ => None,
+                })
+                .map_err(|e| format!("{who}: {e}"))?;
+            }
+            println!("no shared interests → both left to re-queue");
+        }
         "grace" => {
             ca.panic_wipe();
             let g = wait(&rb, "B sees disconnect", |ev| match ev {
@@ -407,6 +498,14 @@ fn pair_test(a: &Args) -> Result<(), String> {
         other => return Err(format!("unknown scenario {other}")),
     }
     Ok(())
+}
+
+fn ev_clone(ev: &Ev) -> Ev {
+    match ev {
+        Ev::Common(t) => Ev::Common(t.clone()),
+        Ev::Profile(p) => Ev::Profile(p.clone()),
+        _ => unreachable!("only used for PSI events"),
+    }
 }
 
 fn chatting(ev: &Ev) -> Option<()> {

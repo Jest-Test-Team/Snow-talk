@@ -4054,6 +4054,7 @@ dependencies = [
  "snow-crypto",
  "snow-pow",
  "snow-proto",
+ "snow-psi",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",

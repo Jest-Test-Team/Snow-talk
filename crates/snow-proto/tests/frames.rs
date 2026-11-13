@@ -65,3 +65,26 @@ fn inner_is_fixed_length_for_chaff_and_max_text() {
     };
     assert_eq!(encode_inner(&too_long), Err(InnerError::TooLarge));
 }
+
+#[test]
+fn psi_and_profile_fit_and_are_bounded() {
+    for m in [
+        Inner::PsiRound1(vec![[0xab; 32]; 16]),
+        Inner::PsiRound2(vec![[0xcd; 32]; 16]),
+        Inner::Profile(Profile {
+            nickname: Some("雪".repeat(MAX_PROFILE_FIELD / 3)),
+            mbti: Some("INTJ".into()),
+            mood: Some("☕".into()),
+            adult_ok: false,
+        }),
+    ] {
+        let b = encode_inner(&m).unwrap();
+        assert_eq!(b.len(), INNER_LEN);
+        assert_eq!(decode_inner(&b).unwrap(), m);
+    }
+    let big = Inner::Profile(Profile {
+        mood: Some("x".repeat(MAX_PROFILE_FIELD + 1)),
+        ..Default::default()
+    });
+    assert_eq!(encode_inner(&big), Err(InnerError::TooLarge));
+}

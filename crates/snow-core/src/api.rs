@@ -24,6 +24,22 @@ pub struct Config {
     /// Overridden by remote config in production. Ignored unless paranoid is granted.
     #[uniffi(default = None)]
     pub chaff_ms: Option<u32>,
+    /// Interest tags (free text, normalized; at most 16 are used). The first one
+    /// picks the server-visible bucket unless `bucket` is set; all of them are
+    /// compared privately with the peer after matching (PSI).
+    #[uniffi(default = [])]
+    pub tags: Vec<String>,
+    /// Adult interest tags. Only used by builds with the `adult_tags` feature
+    /// (Android / sideload); they only ever match other adult tags.
+    #[uniffi(default = [])]
+    pub adult_tags: Vec<String>,
+    /// With tags set: leave automatically if the PSI finds nothing in common
+    /// (`EndReason::NoCommonTags`), so the UI can queue again.
+    #[uniffi(default = true)]
+    pub require_common_tag: bool,
+    /// Ephemeral persona sent to the peer (E2EE) once the chat starts.
+    #[uniffi(default = None)]
+    pub profile: Option<UserProfile>,
     /// Base64 SHA-256 SPKI pins for the relay's TLS chain. Empty = no pinning (dev only).
     #[uniffi(default = [])]
     pub pins: Vec<String>,
@@ -47,6 +63,8 @@ pub enum EndReason {
     ConnectionLost,
     /// Panic button: everything was wiped.
     Wiped,
+    /// The private tag comparison found nothing in common; we left.
+    NoCommonTags,
     Error {
         message: String,
     },
@@ -80,6 +98,22 @@ pub enum PeerEvent {
     ScreenCaptured,
 }
 
+/// Ephemeral, per-chat persona. Never stored; only the peer sees it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, uniffi::Record)]
+pub struct UserProfile {
+    #[uniffi(default = None)]
+    pub nickname: Option<String>,
+    /// e.g. "INFP".
+    #[uniffi(default = None)]
+    pub mbti: Option<String>,
+    /// Today's mood.
+    #[uniffi(default = None)]
+    pub mood: Option<String>,
+    /// Open to adult topics. Always `false` in builds without `adult_tags`.
+    #[uniffi(default = false)]
+    pub adult_ok: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ChatMessage {
     /// Unique per side: `(id, from_me)` identifies a message.
@@ -107,6 +141,11 @@ pub trait ChatListener: Send + Sync {
     fn on_peer(&self, event: PeerEvent);
     /// A burn-after-reading timer expired: remove this message from the screen.
     fn on_burn(&self, id: u64, from_me: bool);
+    /// Result of the private tag comparison: the tags you share (normalized;
+    /// adult ones are prefixed `18+:`). Empty = nothing in common.
+    fn on_common_tags(&self, tags: Vec<String>);
+    /// The peer's ephemeral profile.
+    fn on_profile(&self, profile: UserProfile);
 }
 
 /// One chat client. A new chat calls [`SnowClient::start_match`] again; every

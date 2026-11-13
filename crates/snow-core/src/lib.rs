@@ -11,6 +11,7 @@ mod api;
 mod dns;
 mod engine;
 mod http;
+mod interests;
 mod net;
 mod pacer;
 mod pin;

@@ -216,7 +216,10 @@ mod tests {
 
     #[test]
     fn finds_exactly_the_intersection_on_both_sides() {
-        let (a, b) = run(&["貓", "#Hiking", "jazz"], &["hiking", "爵士", "ＪＡＺＺ", "chess"]);
+        let (a, b) = run(
+            &["貓", "#Hiking", "jazz"],
+            &["hiking", "爵士", "ＪＡＺＺ", "chess"],
+        );
         assert_eq!(a, tags(&["hiking", "jazz"]));
         assert_eq!(a, b);
     }
