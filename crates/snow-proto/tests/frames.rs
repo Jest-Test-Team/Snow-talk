@@ -71,6 +71,20 @@ fn psi_and_profile_fit_and_are_bounded() {
     for m in [
         Inner::PsiRound1(vec![[0xab; 32]; 16]),
         Inner::PsiRound2(vec![[0xcd; 32]; 16]),
+        // snow-media's chunk size must fit a padded plaintext.
+        Inner::MediaChunk {
+            media_id: u64::MAX,
+            index: u16::MAX,
+            data: vec![0xee; 3072],
+        },
+        Inner::MediaOffer {
+            media_id: u64::MAX,
+            kind: MediaKind::Voice,
+            len: u32::MAX,
+            chunks: u16::MAX,
+            key: [1; 32],
+            view_secs: 255,
+        },
         Inner::Profile(Profile {
             nickname: Some("雪".repeat(MAX_PROFILE_FIELD / 3)),
             mbti: Some("INTJ".into()),

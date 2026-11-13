@@ -4,7 +4,7 @@
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
-//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|grace]
+//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|grace]
 //!                    [--tag TEXT]... [--nick NAME]
 //!                    [--paranoid] [--chaff MS]
 //! ```
@@ -22,6 +22,7 @@
 //!   a screenshot notice reaches the peer
 //! * `tags`      — PSI finds exactly the shared tags on both sides; profiles arrive
 //! * `disjoint`  — same bucket, no shared tags: both leave with `NoCommonTags`
+//! * `media`     — a flash photo with GPS EXIF arrives clean, opens once, burns
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
@@ -39,6 +40,8 @@ enum Ev {
     Burn(u64, bool),
     Common(Vec<String>),
     Profile(UserProfile),
+    Media(MediaInfo),
+    MediaBurned(u64, bool),
 }
 
 struct Chan(Sender<Ev>);
@@ -63,6 +66,12 @@ impl ChatListener for Chan {
     }
     fn on_profile(&self, p: UserProfile) {
         let _ = self.0.send(Ev::Profile(p));
+    }
+    fn on_media(&self, m: MediaInfo) {
+        let _ = self.0.send(Ev::Media(m));
+    }
+    fn on_media_burned(&self, id: u64, from_me: bool) {
+        let _ = self.0.send(Ev::MediaBurned(id, from_me));
     }
 }
 
@@ -205,6 +214,10 @@ fn chat(a: &Args) {
                 Ev::Common(t) if t.is_empty() => println!("* no interests in common"),
                 Ev::Common(t) => println!("* you both like: {}", t.join(", ")),
                 Ev::Profile(p) => println!("* peer profile: {p:?}"),
+                Ev::Media(m) => {
+                    println!("* peer sent {:?} #{} (view {}s)", m.kind, m.id, m.view_secs)
+                }
+                Ev::MediaBurned(id, mine) => println!("* media #{id} burned (mine: {mine})"),
             }
         }
     });
@@ -485,6 +498,39 @@ fn pair_test(a: &Args) -> Result<(), String> {
             }
             println!("no shared interests → both left to re-queue");
         }
+        "media" => {
+            let photo = test_photo(b"GPS 25.0330N 121.5654E");
+            let t = Instant::now();
+            let id = ca.send_image(photo, 2).map_err(|e| e.to_string())?;
+            let info = wait(&rb, "media", |ev| match ev {
+                Ev::Media(m) => Some(m.clone()),
+                _ => None,
+            })?;
+            println!("photo arrived in {:?}: {info:?}", t.elapsed());
+            if info.kind != MediaType::Image || info.view_secs != 2 {
+                return Err(format!("bad media info {info:?}"));
+            }
+            let bytes = cb.open_media(info.id).map_err(|e| e.to_string())?;
+            if bytes.windows(3).any(|w| w == b"GPS") || bytes.windows(4).any(|w| w == b"Exif") {
+                return Err("metadata survived".into());
+            }
+            let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+            if (img.width(), img.height()) != (320, 240) {
+                return Err(format!("unexpected size {}x{}", img.width(), img.height()));
+            }
+            if cb.open_media(info.id).is_ok() {
+                return Err("media opened twice".into());
+            }
+            wait(&ra, "sender told it was opened", |ev| {
+                matches!(ev, Ev::MediaBurned(i, true) if *i == id).then_some(())
+            })?;
+            let t = Instant::now();
+            wait(&rb, "view time over", |ev| {
+                matches!(ev, Ev::MediaBurned(i, false) if *i == info.id).then_some(())
+            })?;
+            println!("opened once, metadata-free, burned after {:?}", t.elapsed());
+            pair.exchange(1, "after-media")?;
+        }
         "grace" => {
             ca.panic_wipe();
             let g = wait(&rb, "B sees disconnect", |ev| match ev {
@@ -498,6 +544,21 @@ fn pair_test(a: &Args) -> Result<(), String> {
         other => return Err(format!("unknown scenario {other}")),
     }
     Ok(())
+}
+
+/// A 320×240 JPEG with an EXIF segment carrying `exif`.
+fn test_photo(exif: &[u8]) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(320, 240, |x, y| image::Rgb([x as u8, y as u8, 99]));
+    let mut j = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut std::io::Cursor::new(&mut j), image::ImageFormat::Jpeg)
+        .expect("encode");
+    let mut seg = vec![0xFF, 0xE1];
+    seg.extend_from_slice(&((exif.len() + 8) as u16).to_be_bytes());
+    seg.extend_from_slice(b"Exif\0\0");
+    seg.extend_from_slice(exif);
+    j.splice(2..2, seg);
+    j
 }
 
 fn ev_clone(ev: &Ev) -> Ev {

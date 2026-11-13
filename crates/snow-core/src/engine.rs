@@ -1,6 +1,7 @@
 //! The per-chat async task: PoW → queue → room → handshake → chat.
 use crate::api::*;
 use crate::interests;
+use crate::media::MediaStore;
 use crate::net::{self, NetError, Ws};
 use crate::pacer::{Item, Out, Pacer};
 use crate::transcript::Transcript;
@@ -21,6 +22,13 @@ pub enum Cmd {
     },
     /// An encrypted control message for the peer (sent through the pacer).
     Control(Inner),
+    /// A media offer followed by its chunks (bulk, in order).
+    Media(Vec<Inner>),
+    /// We opened a received item: tell the peer, and time our view.
+    MediaOpened {
+        id: u64,
+        view_secs: u8,
+    },
     Leave,
     Wipe,
     /// Testing: kill the socket without a close frame, as a network drop would.
@@ -55,12 +63,27 @@ enum EngineError {
     Unsupported(&'static str),
 }
 
+/// Plaintext state of one chat, reachable from the UI thread. Wiped when the
+/// chat ends.
+#[derive(Default)]
+pub struct PerChat {
+    pub transcript: std::sync::Mutex<Transcript>,
+    pub media: std::sync::Mutex<MediaStore>,
+}
+
+impl PerChat {
+    fn wipe(&self) {
+        self.transcript.lock().unwrap().clear();
+        self.media.lock().unwrap().clear();
+    }
+}
+
 /// State shared by all chats of one `SnowClient`.
 #[derive(Default, Clone)]
 pub struct Shared {
     pub frames: Arc<Counters>,
-    /// The current chat's messages (see [`crate::transcript`]).
-    pub transcript: Arc<std::sync::Mutex<Transcript>>,
+    /// The current chat's plaintext state.
+    pub chat: Arc<PerChat>,
     /// Bootstrapped once, on the first chat in Tor mode.
     #[cfg(feature = "tor")]
     pub tor: Arc<tokio::sync::OnceCell<crate::tor::TorHandle>>,
@@ -96,7 +119,7 @@ pub async fn run(
     l: Arc<dyn ChatListener>,
     shared: Shared,
 ) {
-    let transcript = shared.transcript.clone();
+    let per_chat = shared.chat.clone();
     let reason = match run_inner(&cfg, &mut cmds, &*l, shared).await {
         Ok(r) => r,
         Err(e) => EndReason::Error {
@@ -104,7 +127,7 @@ pub async fn run(
         },
     };
     // The chat is over: zeroize its plaintext before telling the UI.
-    transcript.lock().unwrap().clear();
+    per_chat.wipe();
     l.on_state(ChatState::Ended { reason });
 }
 
@@ -151,7 +174,7 @@ async fn run_inner(
                 _ => return Err(EngineError::Protocol),
             },
             c = cmds.recv() => match c {
-                Some(Cmd::Send { .. } | Cmd::Control(_) | Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Foreground(_)) => continue,
+                Some(Cmd::Send { .. } | Cmd::Control(_) | Cmd::Media(_) | Cmd::MediaOpened { .. } | Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Foreground(_)) => continue,
                 Some(Cmd::Wipe) => { mm.close().await; return Ok(EndReason::Wiped) }
                 Some(Cmd::Leave) | None => { mm.close().await; return Ok(EndReason::Cancelled) }
             },
@@ -186,12 +209,20 @@ async fn run_inner(
             match c {
                 Cmd::Send { id, body, ttl_secs } => pacer.push(Item::Text { id, body, ttl_secs }),
                 Cmd::Control(i) => pacer.push(Item::Control(i)),
+                Cmd::Media(items) => pacer.push_bulk(items.into_iter().map(Item::Control)),
+                Cmd::MediaOpened { id, view_secs } => chat.media_opened(id, view_secs, &mut pacer),
                 Cmd::Foreground(f) => foreground = f,
                 _ => {}
             }
         }
         let cover = foreground && chat.peer_online;
-        let next_burn = shared.transcript.lock().unwrap().next_burn();
+        let next_burn = [
+            shared.chat.transcript.lock().unwrap().next_burn(),
+            chat.media_deadlines.iter().map(|(t, _)| *t).min(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let lost = tokio::select! {
             out = pacer.next(cover), if chat.session.is_some() => match out {
                 Out::Send(Item::Text { id, body, ttl_secs }) => chat.send_text(&mut room, id, &body, ttl_secs).await.is_err(),
@@ -199,10 +230,18 @@ async fn run_inner(
                 Out::Chaff => chat.send_chaff(&mut room).await.is_err(),
             },
             _ = tokio::time::sleep_until(next_burn.unwrap_or_else(tokio::time::Instant::now)), if next_burn.is_some() => {
-                let burned = shared.transcript.lock().unwrap().burn_due(tokio::time::Instant::now());
+                let now = tokio::time::Instant::now();
+                let burned = shared.chat.transcript.lock().unwrap().burn_due(now);
                 for (id, from_me) in burned {
                     l.on_burn(id, from_me);
                 }
+                chat.media_deadlines.retain(|(t, id)| {
+                    let due = *t <= now;
+                    if due {
+                        l.on_media_burned(*id, false);
+                    }
+                    !due
+                });
                 false
             }
             m = room.recv() => match m {
@@ -227,6 +266,8 @@ async fn run_inner(
             c = cmds.recv() => match c {
                 Some(Cmd::Send { id, body, ttl_secs }) => { pacer.push(Item::Text { id, body, ttl_secs }); false }
                 Some(Cmd::Control(i)) => { pacer.push(Item::Control(i)); false }
+                Some(Cmd::Media(items)) => { pacer.push_bulk(items.into_iter().map(Item::Control)); false }
+                Some(Cmd::MediaOpened { id, view_secs }) => { chat.media_opened(id, view_secs, &mut pacer); false }
                 Some(Cmd::Foreground(f)) => { foreground = f; false }
                 Some(Cmd::Leave) => {
                     let _ = room.send(&ClientMsg::Leave).await;
@@ -332,7 +373,7 @@ async fn reconnect(
         tokio::select! {
             _ = tokio::time::sleep(backoff.min(left)) => {}
             c = cmds.recv() => match c {
-                Some(c @ (Cmd::Send { .. } | Cmd::Control(_) | Cmd::Foreground(_))) => outbox.push(c),
+                Some(c @ (Cmd::Send { .. } | Cmd::Control(_) | Cmd::Media(_) | Cmd::MediaOpened { .. } | Cmd::Foreground(_))) => outbox.push(c),
                 Some(Cmd::DebugDrop | Cmd::DebugFlood(_)) => {}
                 Some(Cmd::Leave) => return Ok(Reconnect::End(EndReason::SelfLeft)),
                 Some(Cmd::Wipe) | None => return Ok(Reconnect::End(EndReason::Wiped)),
@@ -357,6 +398,8 @@ struct Chat {
     outgoing: VecDeque<Inner>,
     /// Set when the chat decides to end itself (e.g. no common tags).
     ending: Option<EndReason>,
+    /// When each opened media item's view time runs out.
+    media_deadlines: Vec<(tokio::time::Instant, u64)>,
     commit: Option<Handshake>,
     hs: Option<Handshaker>,
     session: Option<ChatSession>,
@@ -375,6 +418,7 @@ impl Chat {
             psi: None,
             outgoing: VecDeque::new(),
             ending: None,
+            media_deadlines: Vec::new(),
             commit: Some(commit),
             hs: Some(hs),
             session: None,
@@ -485,6 +529,12 @@ impl Chat {
         }
     }
 
+    fn media_opened(&mut self, id: u64, view_secs: u8, pacer: &mut Pacer) {
+        pacer.push(Item::Control(Inner::MediaBurned { media_id: id }));
+        let until = tokio::time::Instant::now() + std::time::Duration::from_secs(view_secs as u64);
+        self.media_deadlines.push((until, id));
+    }
+
     fn start_psi(&mut self) {
         if self.psi.is_none() {
             let (psi, round1) = Psi::new(&self.tags);
@@ -505,6 +555,7 @@ impl Chat {
                     ttl_secs,
                 };
                 self.shared
+                    .chat
                     .transcript
                     .lock()
                     .unwrap()
@@ -533,6 +584,37 @@ impl Chat {
                 }
             }
             Inner::Profile(p) => l.on_profile(interests::from_wire(p)),
+            Inner::MediaOffer {
+                media_id,
+                kind,
+                len,
+                chunks,
+                key,
+                view_secs,
+            } => self
+                .shared
+                .chat
+                .media
+                .lock()
+                .unwrap()
+                .offer(media_id, kind, len, chunks, key, view_secs),
+            Inner::MediaChunk {
+                media_id,
+                index,
+                data,
+            } => {
+                let done = self
+                    .shared
+                    .chat
+                    .media
+                    .lock()
+                    .unwrap()
+                    .chunk(media_id, index, data);
+                if let Some(info) = done {
+                    l.on_media(info);
+                }
+            }
+            Inner::MediaBurned { media_id } => l.on_media_burned(media_id, true),
             Inner::Chaff | Inner::Ready | Inner::Ext { .. } => {}
         }
     }

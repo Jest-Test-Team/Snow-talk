@@ -1,11 +1,17 @@
 //! Traffic shaping: constant-rate cover traffic and send-time jitter.
 //!
-//! With chaff on, the client sends exactly one frame per tick: a queued message
-//! if one is due, otherwise [`Inner::Chaff`](snow_proto::Inner::Chaff). An observer
-//! (or the relay) sees a steady stream of identical 4096-byte frames, so it can't
-//! tell when anyone is typing or sending. Every message also waits a random
-//! 0–300 ms before it is eligible, which blurs keystroke-timing fingerprints even
-//! when chaff is off.
+//! With chaff on (paranoid mode), the client sends exactly one frame per tick:
+//! a queued item if one is ready, otherwise [`Inner::Chaff`](snow_proto::Inner::Chaff).
+//! An observer (or the relay) sees a steady stream of identical 4096-byte frames,
+//! so it can't tell when anyone is typing or sending. Media then moves at the
+//! chaff rate too: slower, on purpose, because a rate change would give it away.
+//!
+//! Without chaff, frames go out as soon as they're ready, through a token bucket
+//! that stays under the room's free-tier cap.
+//!
+//! Every text/control message also waits a random 0–300 ms before it is
+//! eligible, which blurs keystroke-timing fingerprints. Text and control always
+//! go before bulk media chunks, so a photo never holds up a chat line.
 use rand::Rng;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -13,11 +19,11 @@ use tokio::time::{Instant, Interval, MissedTickBehavior};
 use zeroize::Zeroizing;
 
 pub const DEFAULT_CHAFF_MS: u32 = 1500;
-/// Fastest allowed cover rate; the room caps paranoid slots at 5 frames/s.
+/// Fastest allowed cover rate (4/s); the room caps paranoid slots at 6 frames/s.
 pub const MIN_CHAFF_MS: u32 = 250;
-/// Without chaff, messages are spaced at least this far apart, which keeps a
-/// burst of sends under the room's free-tier cap of 2 frames/s.
-pub const MIN_GAP_MS: u64 = 500;
+/// Free-mode token bucket; the room's free cap is burst 48, 4 frames/s.
+const FREE_BURST: f64 = 40.0;
+const FREE_PER_SEC: f64 = 3.5;
 const MAX_JITTER_MS: u64 = 300;
 
 /// Something real to send.
@@ -27,8 +33,9 @@ pub enum Item {
         body: Zeroizing<String>,
         ttl_secs: u32,
     },
-    /// An encrypted control message (e.g. "screen captured"). It goes through
-    /// the pacer too, so it can't be told apart from text or chaff by timing.
+    /// An encrypted control message (e.g. "screen captured", PSI, a media chunk).
+    /// It goes through the pacer too, so it can't be told apart from text or
+    /// chaff by timing.
     Control(snow_proto::Inner),
 }
 
@@ -42,11 +49,39 @@ pub enum Out {
     Chaff,
 }
 
+/// Token bucket mirroring (a little below) the room's rate cap.
+struct Bucket {
+    tokens: f64,
+    at: Instant,
+}
+
+impl Bucket {
+    fn level(&self, now: Instant) -> f64 {
+        (self.tokens + (now - self.at).as_secs_f64() * FREE_PER_SEC).min(FREE_BURST)
+    }
+
+    fn ready_at(&self, now: Instant) -> Instant {
+        let l = self.level(now);
+        if l >= 1.0 {
+            now
+        } else {
+            now + Duration::from_secs_f64((1.0 - l) / FREE_PER_SEC)
+        }
+    }
+
+    fn take(&mut self, now: Instant) {
+        self.tokens = self.level(now) - 1.0;
+        self.at = now;
+    }
+}
+
 pub struct Pacer {
     interval: Option<Interval>,
+    /// Text and control messages, each with its own jitter.
     queue: VecDeque<Pending>,
-    /// When the last message went out (chaff-off mode only).
-    last: Option<Instant>,
+    /// Media offers and chunks, in order, after everything in `queue`.
+    bulk: VecDeque<Item>,
+    bucket: Bucket,
 }
 
 impl Pacer {
@@ -63,7 +98,11 @@ impl Pacer {
         Self {
             interval,
             queue: VecDeque::new(),
-            last: None,
+            bulk: VecDeque::new(),
+            bucket: Bucket {
+                tokens: FREE_BURST,
+                at: Instant::now(),
+            },
         }
     }
 
@@ -73,12 +112,24 @@ impl Pacer {
         self.queue.push_back(Pending { due, item });
     }
 
-    fn pop_due(&mut self) -> Option<Pending> {
-        if self.queue.front().is_some_and(|p| p.due <= Instant::now()) {
-            self.queue.pop_front()
-        } else {
-            None
+    /// Queue bulk data (media). Kept in order, sent when nothing else is ready.
+    pub fn push_bulk(&mut self, items: impl IntoIterator<Item = Item>) {
+        self.bulk.extend(items);
+    }
+
+    fn pop(&mut self, now: Instant) -> Option<Item> {
+        if self.queue.front().is_some_and(|p| p.due <= now) {
+            return self.queue.pop_front().map(|p| p.item);
         }
+        self.bulk.pop_front()
+    }
+
+    /// When something will be ready to send, ignoring rate limits.
+    fn ready(&self, now: Instant) -> Option<Instant> {
+        if !self.bulk.is_empty() {
+            return Some(now);
+        }
+        self.queue.front().map(|p| p.due.max(now))
     }
 
     /// Resolves when the next frame should go out. `cover` = whether chaff is
@@ -88,24 +139,23 @@ impl Pacer {
         match self.interval.is_some() {
             true => loop {
                 self.interval.as_mut().expect("checked").tick().await;
-                if let Some(p) = self.pop_due() {
-                    return Out::Send(p.item);
+                if let Some(item) = self.pop(Instant::now()) {
+                    return Out::Send(item);
                 }
                 if cover {
                     return Out::Chaff;
                 }
             },
             false => loop {
-                match self.queue.front() {
-                    Some(p) => {
-                        let gap = self.last.map(|t| t + Duration::from_millis(MIN_GAP_MS));
-                        tokio::time::sleep_until(gap.map_or(p.due, |g| g.max(p.due))).await
-                    }
+                let now = Instant::now();
+                match self.ready(now) {
+                    Some(at) => tokio::time::sleep_until(at.max(self.bucket.ready_at(now))).await,
                     None => std::future::pending::<()>().await,
                 }
-                if let Some(p) = self.pop_due() {
-                    self.last = Some(Instant::now());
-                    return Out::Send(p.item);
+                let now = Instant::now();
+                if let Some(item) = self.pop(now) {
+                    self.bucket.take(now);
+                    return Out::Send(item);
                 }
             },
         }
@@ -158,16 +208,33 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn chaff_off_spaces_bursts() {
+    async fn chaff_off_bursts_then_rate_limits() {
         let mut p = Pacer::new(Some(0));
-        for i in 1..=5 {
-            p.push(text(i));
-        }
+        p.push_bulk((1..=60).map(text));
         let start = Instant::now();
-        for i in 1..=5 {
+        for i in 1..=40 {
             assert_eq!(id(p.next(false).await), i);
         }
-        assert!(start.elapsed() >= Duration::from_millis(4 * MIN_GAP_MS));
+        assert!(
+            start.elapsed() < Duration::from_millis(10),
+            "burst is immediate"
+        );
+        for i in 41..=60 {
+            assert_eq!(id(p.next(false).await), i);
+        }
+        let rate = 20.0 / (start.elapsed().as_secs_f64());
+        assert!(rate <= FREE_PER_SEC + 0.1, "rate {rate}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn text_jumps_ahead_of_bulk() {
+        let mut p = Pacer::new(Some(250));
+        p.push_bulk((100..110).map(text));
+        assert_eq!(id(p.next(true).await), 100);
+        p.push(text(7));
+        tokio::time::advance(Duration::from_millis(MAX_JITTER_MS)).await;
+        assert_eq!(id(p.next(true).await), 7);
+        assert_eq!(id(p.next(true).await), 101);
     }
 
     #[tokio::test(start_paused = true)]

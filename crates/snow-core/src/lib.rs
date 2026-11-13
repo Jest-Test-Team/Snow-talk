@@ -12,6 +12,7 @@ mod dns;
 mod engine;
 mod http;
 mod interests;
+mod media;
 mod net;
 mod pacer;
 mod pin;

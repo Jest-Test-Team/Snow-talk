@@ -17,16 +17,17 @@ const DEFAULT_GRACE_SECS: u32 = 180;
 /// is never written to storage and is lost if the object hibernates or restarts.
 const HOLD_FRAMES: usize = 32;
 
-/// Per-slot relay rate caps (token bucket: burst, frames/s). Normal chat stays
-/// far below the free cap, which mainly stops a modified client from running
-/// cover traffic (and keeping the room awake) without paying for it.
+/// Per-slot relay rate caps (token bucket: burst, frames/s). The free burst fits
+/// a flash photo (~40 chunks); paranoid adds headroom for 4/s cover traffic.
+/// Caps bound per-room volume; they can't stop a modified client from sending
+/// slow chaff to keep its own room awake (accepted, see docs/progress.md).
 const FREE_RATE: Rate = Rate {
-    burst: 20.0,
-    per_sec: 2.0,
+    burst: 48.0,
+    per_sec: 4.0,
 };
 const PARANOID_RATE: Rate = Rate {
-    burst: 40.0,
-    per_sec: 5.0,
+    burst: 64.0,
+    per_sec: 6.0,
 };
 
 #[derive(Clone, Copy)]

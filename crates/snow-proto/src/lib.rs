@@ -20,7 +20,7 @@ mod msg;
 
 pub use frame::{decode_frame, encode_frame, FrameError, FRAME_LEN, MAX_BODY_LEN, VERSION};
 pub use inner::{
-    decode_inner, encode_inner, Inner, InnerError, Profile, INNER_LEN, MAX_PROFILE_FIELD,
-    MAX_TEXT_LEN,
+    decode_inner, encode_inner, Inner, InnerError, MediaKind, Profile, INNER_LEN,
+    MAX_PROFILE_FIELD, MAX_TEXT_LEN,
 };
 pub use msg::{ClientMsg, ErrorCode, Handshake, PeerEnvelope, PowSolution, Role, ServerMsg};

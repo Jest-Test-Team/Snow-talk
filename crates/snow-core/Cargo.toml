@@ -23,6 +23,7 @@ required-features = ["bindgen"]
 
 [dependencies]
 snow-psi = { path = "../snow-psi" }
+snow-media = { path = "../snow-media" }
 arti-client = { version = "0.48", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite"], optional = true }
 base64 = "0.23.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }

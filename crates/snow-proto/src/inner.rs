@@ -53,6 +53,32 @@ pub enum Inner {
     PsiRound1(Vec<[u8; 32]>),
     PsiRound2(Vec<[u8; 32]>),
     Profile(Profile),
+    /// A flash photo / voice note is coming in `chunks` pieces (see `snow-media`).
+    /// `key` is its single-use media key; the item self-destructs `view_secs`
+    /// after it is opened.
+    MediaOffer {
+        media_id: u64,
+        kind: MediaKind,
+        len: u32,
+        chunks: u16,
+        key: [u8; 32],
+        view_secs: u8,
+    },
+    MediaChunk {
+        media_id: u64,
+        index: u16,
+        data: Vec<u8>,
+    },
+    /// The receiver opened (and so destroyed) the item.
+    MediaBurned {
+        media_id: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MediaKind {
+    Image,
+    Voice,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
