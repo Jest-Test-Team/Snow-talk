@@ -263,4 +263,42 @@ impl ChatSession {
     pub fn sas(&self) -> Sas {
         self.sas
     }
+
+    /// Serialize the ratchet state, encrypted and authenticated under `key`
+    /// (VIP saved sessions only). Whoever holds the result and `key` can read
+    /// every later message of this chat, so `key` must live in hardware-backed
+    /// storage. The returned string is zeroized on drop.
+    pub fn save(&self, key: &[u8; 32]) -> Zeroizing<String> {
+        let mut out = Zeroizing::new(hex_sas(&self.sas));
+        out.push(':');
+        out.push_str(&self.session.pickle().encrypt(key));
+        out
+    }
+
+    /// Inverse of [`Self::save`].
+    pub fn restore(saved: &str, key: &[u8; 32]) -> Result<Self, CryptoError> {
+        let (sas, pickle) = saved.split_once(':').ok_or(CryptoError::Decrypt)?;
+        let sas = parse_sas(sas).ok_or(CryptoError::Decrypt)?;
+        let p = vodozemac::olm::SessionPickle::from_encrypted(pickle, key)
+            .map_err(|_| CryptoError::Decrypt)?;
+        Ok(Self {
+            session: Session::from_pickle(p),
+            sas,
+        })
+    }
+}
+
+fn hex_sas(s: &Sas) -> String {
+    s.0.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn parse_sas(s: &str) -> Option<Sas> {
+    if s.len() != 14 {
+        return None;
+    }
+    let mut out = [0u8; 7];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(Sas(out))
 }

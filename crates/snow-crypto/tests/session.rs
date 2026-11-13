@@ -146,3 +146,28 @@ fn largest_prekey_ciphertext_fits_in_a_frame() {
     let frame = encode_frame(&ClientMsg::Relay(relay), &mut rand::rngs::OsRng).unwrap();
     assert_eq!(frame.len(), snow_proto::FRAME_LEN);
 }
+
+#[test]
+fn saved_session_resumes_and_needs_the_key() {
+    let (mut a, mut b) = pair();
+    let e = a.encrypt(&text(1, "before")).unwrap();
+    b.decrypt(&e).unwrap();
+    let key = [7u8; 32];
+    let saved = b.save(&key);
+    assert!(!saved.contains("before"));
+    assert_eq!(
+        ChatSession::restore(&saved, &[8u8; 32]).err(),
+        Some(CryptoError::Decrypt),
+        "wrong key"
+    );
+    let sas = b.sas();
+    b.destroy();
+    let mut b = ChatSession::restore(&saved, &key).unwrap();
+    assert_eq!(b.sas(), sas);
+    // Messages sent while b was saved, and new ones in both directions.
+    let e = a.encrypt(&text(2, "while away")).unwrap();
+    assert_eq!(b.decrypt(&e).unwrap(), text(2, "while away"));
+    let e = b.encrypt(&text(3, "back")).unwrap();
+    assert_eq!(a.decrypt(&e).unwrap(), text(3, "back"));
+    assert!(ChatSession::restore("garbage", &key).is_err());
+}
