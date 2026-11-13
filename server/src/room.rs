@@ -13,6 +13,7 @@
 //! claim also needs a real conversation: both sides present for
 //! `GOOD_AFTER_SECS` and both having sent `MIN_ACTIVE_FRAMES`. Tokens are
 //! unlinkable (VOPRF), so the issuer never learns who it rewarded.
+use crate::nullifiers::redeem;
 use crate::ticket::{Kind, Ticket, FLAG_PARANOID};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
@@ -96,10 +97,17 @@ struct Rep {
     claim: [Option<Vec<[u8; 32]>>; 2],
     /// End of the report window, ms (0 = none).
     window_until_ms: u64,
+    /// VIP 24 h hold: slots are kept until then even if both sides are offline.
+    #[serde(default)]
+    extended_until_ms: u64,
 }
 
 /// Resume tickets outlive the grace period; the room enforces the real deadline.
-const RESUME_TICKET_TTL_MS: u64 = 24 * 3600 * 1000;
+/// Longer than the 24 h hold plus a rotation period, so the ticket in a saved
+/// session is still valid at the end of the hold.
+const RESUME_TICKET_TTL_MS: u64 = 26 * 3600 * 1000;
+/// VIP room hold (`ClientMsg::Extend`). Overridable with `EXTEND_SECS`.
+const DEFAULT_EXTEND_SECS: u32 = 24 * 3600;
 /// How long a closed room keeps its metadata before wiping it.
 const CLEANUP_DELAY_MS: i64 = 60_000;
 
@@ -235,11 +243,13 @@ impl ChatRoom {
         if s.status != SlotStatus::Connected {
             return Ok(());
         }
-        let grace = self.grace_secs();
+        let now = now_ms();
+        let extended = self.rep().await?.extended_until_ms;
         s.status = SlotStatus::Disconnected;
-        s.deadline_ms = now_ms() + grace as u64 * 1000;
+        s.deadline_ms = (now + self.grace_secs() as u64 * 1000).max(extended);
+        let grace = ((s.deadline_ms - now) / 1000) as u32;
         self.put_slot(slot, s).await?;
-        if self.slot(1 - slot).await?.status == SlotStatus::Disconnected {
+        if self.slot(1 - slot).await?.status == SlotStatus::Disconnected && extended <= now {
             // Both sides are gone; nobody is left to wait.
             return self.close_room(None).await;
         }
@@ -382,6 +392,49 @@ impl ChatRoom {
         r.window_until_ms = 0;
         self.put_rep(&r).await?;
         self.close_room(None).await
+    }
+
+    /// VIP hold: keep the room for `EXTEND_SECS` (one VIP token, or anyone with
+    /// `EXTEND_GRANT=open`). Idempotent while the hold lasts. Both sides are told,
+    /// since it means the other device may keep a saved copy of the session.
+    async fn on_extend(&self, ws: &WebSocket, slot: u8, spend: Vec<Vec<u8>>) -> Result<()> {
+        let mut r = self.rep().await?;
+        let now = now_ms();
+        if r.extended_until_ms <= now {
+            let granted = self.var("EXTEND_GRANT", String::new()) == "open"
+                || redeem(&self.env, &spend, snow_tokens::Kind::Vip, 1).await?;
+            if !granted {
+                return send(ws, &ServerMsg::Error(ErrorCode::NotAllowed));
+            }
+            r.extended_until_ms = now + self.var("EXTEND_SECS", DEFAULT_EXTEND_SECS) as u64 * 1000;
+            self.put_rep(&r).await?;
+            // A peer that is already away is held for the full period too.
+            for i in 0..2u8 {
+                let mut s = self.slot(i).await?;
+                if s.status == SlotStatus::Disconnected {
+                    s.deadline_ms = s.deadline_ms.max(r.extended_until_ms);
+                    self.put_slot(i, s).await?;
+                }
+            }
+            self.schedule_alarm().await?;
+            event("room_extended");
+        }
+        let hold_secs = ((r.extended_until_ms - now) / 1000) as u32;
+        send(
+            ws,
+            &ServerMsg::Extended {
+                hold_secs,
+                by_me: true,
+            },
+        )?;
+        self.send_to(
+            1 - slot,
+            &ServerMsg::Extended {
+                hold_secs,
+                by_me: false,
+            },
+        )
+        .await
     }
 
     /// Point the single alarm at the earliest grace deadline or report window.
@@ -542,6 +595,7 @@ impl DurableObject for ChatRoom {
             }
             Some(ClientMsg::Leave { claim }) => self.on_leave(att.slot, claim, false).await,
             Some(ClientMsg::Report { claim }) => self.on_leave(att.slot, claim, true).await,
+            Some(ClientMsg::Extend { spend }) => self.on_extend(&ws, att.slot, spend).await,
             _ => send(&ws, &ServerMsg::Error(ErrorCode::BadFrame)),
         }
     }

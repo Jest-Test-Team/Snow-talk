@@ -90,6 +90,16 @@ impl Transcript {
             .collect()
     }
 
+    /// `(id, from_me, body)` of messages without a burn timer (for a VIP saved
+    /// session; burning messages are never written anywhere).
+    pub fn lasting(&self) -> Vec<(u64, bool, String)> {
+        self.items
+            .iter()
+            .filter(|e| e.burn_at.is_none())
+            .map(|e| (e.id, e.from_me, e.body.to_string()))
+            .collect()
+    }
+
     /// Drop (and zeroize) everything.
     pub fn clear(&mut self) {
         self.items.clear();

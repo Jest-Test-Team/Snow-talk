@@ -77,6 +77,9 @@ pub enum EndReason {
     NoCommonTags,
     /// We reported the peer and left.
     Reported,
+    /// VIP: the session was saved with [`SnowClient::suspend`]; the room holds
+    /// our slot until the hold ends. Resume with [`SnowClient::resume_saved`].
+    Suspended,
     Error {
         message: String,
     },
@@ -107,9 +110,20 @@ pub enum ChatState {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum PeerEvent {
-    Disconnected { grace_secs: u32 },
+    Disconnected {
+        grace_secs: u32,
+    },
     Reconnected,
     ScreenCaptured,
+    /// The room is held for `hold_secs` (VIP). `by_me = false`: the peer did
+    /// it and may keep an encrypted copy of this chat on their device; the UI
+    /// must say so.
+    Extended {
+        hold_secs: u32,
+        by_me: bool,
+    },
+    /// Our [`SnowClient::extend_chat`] was refused (no VIP token).
+    ExtendRefused,
 }
 
 /// Ephemeral, per-chat persona. Never stored; only the peer sees it.
@@ -217,6 +231,12 @@ pub enum CoreError {
     MediaGone,
     #[error("wallet data is corrupt")]
     BadWallet,
+    #[error("the chat must be extended (VIP) before it can be saved")]
+    NotExtended,
+    #[error("key must be 32 bytes")]
+    BadKey,
+    #[error("saved session is corrupt or the key is wrong")]
+    BadSavedSession,
 }
 
 /// Implemented by the UI (Swift / Kotlin) to receive events. Called from a background thread.
@@ -301,7 +321,71 @@ impl SnowClient {
             rx,
             self.listener.clone(),
             shared,
+            None,
         ));
+    }
+
+    /// VIP: ask the room to hold this chat for 24 h (spends one VIP token).
+    /// Both sides get `PeerEvent::Extended`, or we get `ExtendRefused`.
+    pub fn extend_chat(&self) -> Result<(), CoreError> {
+        self.command(Cmd::Extend)
+    }
+
+    /// VIP, after `Extended`: seal the session under `key` (32 bytes from
+    /// hardware-backed storage), disconnect without leaving, and end with
+    /// `EndReason::Suspended`. Store the returned bytes; they are useless
+    /// without `key`. Unsent messages still in the queue are dropped.
+    pub fn suspend(&self, key: Vec<u8>) -> Result<Vec<u8>, CoreError> {
+        let key: Zeroizing<[u8; 32]> =
+            Zeroizing::new(key.as_slice().try_into().map_err(|_| CoreError::BadKey)?);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.command(Cmd::Suspend(key, tx))?;
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| CoreError::NotChatting)?
+    }
+
+    /// Re-enter a chat saved with [`Self::suspend`] (any time within the hold,
+    /// also after an app restart). Restores the saved messages and continues
+    /// with `Chatting`, or ends with `ConnectionLost` if the room is gone.
+    pub fn resume_saved(&self, saved: Vec<u8>, key: Vec<u8>) -> Result<(), CoreError> {
+        let key: Zeroizing<[u8; 32]> =
+            Zeroizing::new(key.as_slice().try_into().map_err(|_| CoreError::BadKey)?);
+        let keys = crate::saved::Keys::derive(&key);
+        let s = crate::saved::Saved::open(&saved, &keys).ok_or(CoreError::BadSavedSession)?;
+        let session = snow_crypto::ChatSession::restore(&s.session, &keys.pickle)
+            .map_err(|_| CoreError::BadSavedSession)?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        if let Some(old) = self.cmd.lock().unwrap().replace(tx) {
+            let _ = old.send(Cmd::Leave);
+        }
+        let chat = Arc::new(PerChat::default());
+        {
+            let mut t = chat.transcript.lock().unwrap();
+            let mut max_id = 0;
+            for (id, from_me, body) in &s.messages {
+                let safety = if *from_me {
+                    Safety::clean()
+                } else {
+                    crate::screening::screen(body)
+                };
+                t.push(*id, *from_me, Zeroizing::new(body.clone()), 0, safety);
+                max_id = max_id.max(*id);
+            }
+            self.next_id.fetch_max(max_id + 1, Ordering::Relaxed);
+        }
+        *self.chat.lock().unwrap() = chat.clone();
+        let shared = engine::Shared {
+            chat,
+            ..self.shared.clone()
+        };
+        self.rt.spawn(engine::run(
+            self.cfg.clone(),
+            rx,
+            self.listener.clone(),
+            shared,
+            Some((s, session)),
+        ));
+        Ok(())
     }
 
     /// Queue a text message. Returns its local id. `ttl_secs > 0` burns it on

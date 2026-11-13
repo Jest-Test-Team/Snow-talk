@@ -40,6 +40,13 @@ pub enum Cmd {
     Foreground(bool),
     /// Testing: send `n` cover frames back-to-back, bypassing the pacer.
     DebugFlood(u32),
+    /// VIP: ask the room to hold this chat for 24 h.
+    Extend,
+    /// VIP: seal the session under this key, disconnect without leaving, stop.
+    Suspend(
+        Zeroizing<[u8; 32]>,
+        std::sync::mpsc::Sender<Result<Vec<u8>, CoreError>>,
+    ),
 }
 
 /// Test/diagnostic counters.
@@ -153,6 +160,25 @@ fn spend_tokens(cfg: &Config, shared: &Shared, l: &dyn ChatListener) -> Vec<Vec<
         .collect()
 }
 
+/// One VIP token for a room hold, if the wallet has one (else the room decides
+/// by policy).
+fn take_vip(shared: &Shared, l: &dyn ChatListener) -> Vec<Vec<u8>> {
+    let epoch = snow_tokens::epoch(unix_now());
+    let taken = shared
+        .wallet
+        .lock()
+        .unwrap()
+        .take(snow_tokens::Kind::Vip, 1, epoch)
+        .unwrap_or_default();
+    if !taken.is_empty() {
+        l.on_wallet_changed();
+    }
+    taken
+        .iter()
+        .map(|t| postcard::to_allocvec(t).expect("token serializes"))
+        .collect()
+}
+
 /// A fresh, unlinkable good-chat token request.
 fn new_claim() -> (snow_tokens::Request, Vec<[u8; 32]>) {
     use rand::RngCore;
@@ -262,16 +288,22 @@ async fn dialer(
     }
 }
 
+/// Run one chat: a new match, or (`saved`) a VIP session resumed from disk.
 pub async fn run(
     cfg: Config,
     mut cmds: mpsc::UnboundedReceiver<Cmd>,
     l: Arc<dyn ChatListener>,
     shared: Shared,
+    saved: Option<(crate::saved::Saved, ChatSession)>,
 ) {
     let per_chat = shared.chat.clone();
     let wallet = shared.wallet.clone();
     let remote = shared.remote.clone();
-    let out = match run_inner(&cfg, &mut cmds, &*l, shared).await {
+    let res = match saved {
+        None => run_inner(&cfg, &mut cmds, &*l, shared).await,
+        Some((s, session)) => run_resumed(&cfg, &mut cmds, &*l, shared, s, session).await,
+    };
+    let out = match res {
         Ok(o) => o,
         Err(e) => EndReason::Error {
             message: e.to_string(),
@@ -352,7 +384,7 @@ async fn run_inner(
                 _ => return Err(EngineError::Protocol),
             },
             c = cmds.recv() => match c {
-                Some(Cmd::Send { .. } | Cmd::Control(_) | Cmd::Media(_) | Cmd::MediaOpened { .. } | Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Foreground(_)) => continue,
+                Some(Cmd::Send { .. } | Cmd::Control(_) | Cmd::Media(_) | Cmd::MediaOpened { .. } | Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Foreground(_) | Cmd::Extend | Cmd::Suspend(..)) => continue,
                 Some(Cmd::Wipe) => { mm.close().await; return Ok(EndReason::Wiped.into()) }
                 Some(Cmd::Leave | Cmd::Report) | None => { mm.close().await; return Ok(EndReason::Cancelled.into()) }
             },
@@ -364,11 +396,69 @@ async fn run_inner(
     let paranoid = paranoid && cfg.paranoid;
     l.on_state(ChatState::Handshaking { paranoid, trusted });
     let room_url = "/room";
-    let (mut room, mut resume, peer_present) = join_room(&netw, room_url, &ticket).await?;
+    let (mut room, resume, peer_present) = join_room(&netw, room_url, &ticket).await?;
     let mut chat = Chat::new(role, shared.clone(), cfg);
     if peer_present {
         chat.send_commit(&mut room).await?;
     }
+    chat_loop(
+        cfg, cmds, l, &shared, &netw, room, resume, chat, paranoid, trusted,
+    )
+    .await
+}
+
+/// Re-enter the room of a saved session with its resume ticket.
+async fn run_resumed(
+    cfg: &Config,
+    cmds: &mut mpsc::UnboundedReceiver<Cmd>,
+    l: &dyn ChatListener,
+    shared: Shared,
+    saved: crate::saved::Saved,
+    session: ChatSession,
+) -> Result<Outcome, EngineError> {
+    let base = cfg.server_url.trim_end_matches('/');
+    let dialer = dialer(cfg, &shared, l).await?;
+    let netw = net::Net::new(base, &cfg.pins, dialer).await?;
+    l.on_state(ChatState::Reconnecting {
+        seconds_left: RECONNECT_SECS,
+    });
+    let (room, resume, _) = match join_room(&netw, "/room", &saved.resume).await {
+        Ok(j) => j,
+        // The hold ran out, or the peer left: the room is gone.
+        Err(EngineError::Net(NetError::Rejected(_))) => return Ok(EndReason::ConnectionLost.into()),
+        Err(e) => return Err(e),
+    };
+    let mut chat = Chat::new(saved.role, shared.clone(), cfg);
+    chat.restore(session, l);
+    chat_loop(
+        cfg,
+        cmds,
+        l,
+        &shared,
+        &netw,
+        room,
+        resume,
+        chat,
+        saved.paranoid,
+        saved.trusted,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn chat_loop(
+    cfg: &Config,
+    cmds: &mut mpsc::UnboundedReceiver<Cmd>,
+    l: &dyn ChatListener,
+    shared: &Shared,
+    netw: &net::Net,
+    mut room: Ws,
+    mut resume: String,
+    mut chat: Chat,
+    paranoid: bool,
+    trusted: bool,
+) -> Result<Outcome, EngineError> {
+    let room_url = "/room";
     let mut rotate_at = next_rotation(cfg);
     let mut outbox: Vec<Cmd> = Vec::new();
     // Without a paranoid grant there is no cover traffic: the room would rate-limit
@@ -445,7 +535,7 @@ async fn run_inner(
             _ = tokio::time::sleep_until(rotate_at) => {
                 // Session-ID rotation: enter the same slot on a fresh socket with
                 // the resume ticket; the room then revokes the old socket and ticket.
-                if let Ok((new, r, _)) = join_room(&netw, room_url, &resume).await {
+                if let Ok((new, r, _)) = join_room(netw, room_url, &resume).await {
                     let old = std::mem::replace(&mut room, new);
                     resume = r;
                     chat.drain(old, &mut room, l).await?;
@@ -482,6 +572,19 @@ async fn run_inner(
                     }
                     lost
                 }
+                Some(Cmd::Extend) => {
+                    let spend = take_vip(shared, l);
+                    room.send(&ClientMsg::Extend { spend }).await.is_err()
+                }
+                Some(Cmd::Suspend(key, reply)) => match chat.save(&resume, &key, paranoid, trusted) {
+                    Ok(blob) => {
+                        // No `Leave`: the room keeps our slot for the rest of the hold.
+                        room.abort().await;
+                        let _ = reply.send(Ok(blob));
+                        return Ok(EndReason::Suspended.into());
+                    }
+                    Err(e) => { let _ = reply.send(Err(e)); false }
+                },
                 Some(Cmd::Wipe) | None => { room.close().await; return Ok(EndReason::Wiped.into()) }
             },
         };
@@ -491,7 +594,7 @@ async fn run_inner(
             return Ok(end.into());
         }
         if lost {
-            match reconnect(&netw, room_url, &mut resume, cmds, &mut outbox, l).await? {
+            match reconnect(netw, room_url, &mut resume, cmds, &mut outbox, l).await? {
                 Reconnect::Joined(ws) => {
                     room = *ws;
                     l.on_state(if chat.session.is_some() {
@@ -574,7 +677,8 @@ async fn reconnect(
             _ = tokio::time::sleep(backoff.min(left)) => {}
             c = cmds.recv() => match c {
                 Some(c @ (Cmd::Send { .. } | Cmd::Control(_) | Cmd::Media(_) | Cmd::MediaOpened { .. } | Cmd::Foreground(_))) => outbox.push(c),
-                Some(Cmd::DebugDrop | Cmd::DebugFlood(_)) => {}
+                // A suspend request's reply sender is dropped: "not chatting".
+                Some(Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Extend | Cmd::Suspend(..)) => {}
                 Some(Cmd::Leave | Cmd::Report) => return Ok(Reconnect::End(EndReason::SelfLeft)),
                 Some(Cmd::Wipe) | None => return Ok(Reconnect::End(EndReason::Wiped)),
             },
@@ -602,6 +706,8 @@ struct Chat {
     media_deadlines: Vec<(tokio::time::Instant, u64)>,
     /// From `PeerLeft`: how long we may still report the peer.
     report_secs: u32,
+    /// The room is held for 24 h (VIP); the session may be saved.
+    extended: bool,
     commit: Option<Handshake>,
     hs: Option<Handshaker>,
     session: Option<ChatSession>,
@@ -622,6 +728,7 @@ impl Chat {
             ending: None,
             media_deadlines: Vec::new(),
             report_secs: 0,
+            extended: false,
             commit: Some(commit),
             hs: Some(hs),
             session: None,
@@ -700,6 +807,11 @@ impl Chat {
                     .rate_limited
                     .fetch_add(1, Ordering::Relaxed);
             }
+            ServerMsg::Extended { hold_secs, by_me } => {
+                self.extended = true;
+                l.on_peer(PeerEvent::Extended { hold_secs, by_me });
+            }
+            ServerMsg::Error(ErrorCode::NotAllowed) => l.on_peer(PeerEvent::ExtendRefused),
             ServerMsg::Error(c) => return Err(EngineError::Server(c)),
             ServerMsg::Rotate { .. }
             | ServerMsg::Joined { .. }
@@ -737,6 +849,41 @@ impl Chat {
         if let Some(p) = self.profile.take() {
             self.outgoing.push_back(Inner::Profile(p));
         }
+    }
+
+    /// Continue a saved session: no handshake, PSI or profile this time.
+    fn restore(&mut self, s: ChatSession, l: &dyn ChatListener) {
+        self.hs = None;
+        self.commit = None;
+        self.tags.clear();
+        self.profile = None;
+        self.extended = true;
+        l.on_sas(s.sas().emoji().iter().map(|e| e.to_string()).collect());
+        l.on_state(ChatState::Chatting);
+        self.session = Some(s);
+    }
+
+    fn save(
+        &self,
+        resume: &str,
+        key: &[u8; 32],
+        paranoid: bool,
+        trusted: bool,
+    ) -> Result<Vec<u8>, CoreError> {
+        let session = self.session.as_ref().ok_or(CoreError::NotChatting)?;
+        if !self.extended {
+            return Err(CoreError::NotExtended);
+        }
+        let keys = crate::saved::Keys::derive(key);
+        let saved = crate::saved::Saved {
+            resume: resume.to_string(),
+            role: self.role,
+            paranoid,
+            trusted,
+            session: session.save(&keys.pickle).to_string(),
+            messages: self.shared.chat.transcript.lock().unwrap().lasting(),
+        };
+        Ok(saved.seal(&keys))
     }
 
     fn media_opened(&mut self, id: u64, view_secs: u8, pacer: &mut Pacer) {

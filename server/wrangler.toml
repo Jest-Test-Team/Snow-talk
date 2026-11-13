@@ -14,6 +14,8 @@ PARANOID_GRANT = "token"
 # is reserved for other trusted users before anyone may be matched with them.
 TRUSTED_MIN = "3"
 TRUSTED_EXCLUSIVE_SECS = "30"
+# 24 h room hold (saved sessions): "open" = anyone (dev); else one VIP token.
+EXTEND_GRANT = "token"
 
 [[durable_objects.bindings]]
 name = "MATCHMAKER"

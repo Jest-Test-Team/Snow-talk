@@ -25,6 +25,8 @@ pub enum ErrorCode {
     RoomFull,
     RateLimited,
     Internal,
+    /// A perk was asked for without the token it costs.
+    NotAllowed,
 }
 
 /// Client → server. Sent to the matchmaker or to a chat room depending on the socket.
@@ -52,6 +54,10 @@ pub enum ClientMsg {
     /// Report the peer (no content is sent) and leave. The peer gets no token
     /// for this chat; the reporter may still claim one.
     Report { claim: Vec<[u8; 32]> },
+    /// Hold this room for 24 h (VIP: one VIP token in `spend`), so either side
+    /// can come back from a saved session after the app was closed. Both sides
+    /// are told ([`ServerMsg::Extended`]).
+    Extend { spend: Vec<Vec<u8>> },
 }
 
 /// Server → client.
@@ -100,6 +106,12 @@ pub enum ServerMsg {
     /// Our claim was refused (reported, too short, or already issued).
     NoTokens,
     Error(ErrorCode),
+    /// The room is held for `hold_secs` even if both sides go offline.
+    /// `by_me`: we asked for it (else the peer did, and may save the session).
+    Extended {
+        hold_secs: u32,
+        by_me: bool,
+    },
 }
 
 /// Handshake messages carried in [`PeerEnvelope::Handshake`].

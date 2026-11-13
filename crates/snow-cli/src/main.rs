@@ -34,6 +34,9 @@
 //! * `config`    — with `--config-key`: the signed config and sponsor catalog are
 //!   fetched and verified, a sponsor matching the shared tag is picked locally,
 //!   and tokens under the pinned issuer key are accepted
+//! * `extend`    — A extends the room (VIP; relay with `EXTEND_GRANT=open`),
+//!   saves the session and quits; the room outlives the normal grace period; a
+//!   brand-new client resumes from the sealed blob and the chat continues
 //! * `config-tagging` — the config pins issuer keys the relay doesn't use (as a
 //!   relay tagging users with its own keys would): tokens must be refused
 use snow_core::*;
@@ -659,6 +662,87 @@ fn pair_test(a: &Args) -> Result<(), String> {
             if (ta, tb) != (want, want) {
                 return Err(format!("expected {want} token each, got A={ta} B={tb}"));
             }
+        }
+        "extend" => {
+            ca.extend_chat().map_err(|e| e.to_string())?;
+            let ext = |mine: bool| {
+                move |ev: &Ev| match ev {
+                    Ev::Peer(PeerEvent::Extended { hold_secs, by_me }) if *by_me == mine => {
+                        Some(*hold_secs)
+                    }
+                    _ => None,
+                }
+            };
+            let hold = wait(&ra, "A extended", |ev| match ev {
+                Ev::Peer(PeerEvent::ExtendRefused) => Some(None),
+                ev => ext(true)(ev).map(Some),
+            })?
+            .ok_or("extend refused: no VIP token (relay policy)")?;
+            wait(&rb, "B told about the hold", ext(false))?;
+            let keep = format!("{} keep-me", a.marker);
+            let burn = format!("{} burn-me", a.marker);
+            ca.send_text(keep.clone(), 0).map_err(|e| e.to_string())?;
+            ca.send_text(burn.clone(), 60).map_err(|e| e.to_string())?;
+            for want in [&keep, &burn] {
+                wait(&rb, "B gets A's message", |ev| {
+                    matches!(ev, Ev::Msg(m) if &m.body == want).then_some(())
+                })?;
+            }
+            let key = vec![0x5au8; 32];
+            let blob = ca.suspend(key.clone()).map_err(|e| e.to_string())?;
+            wait(&ra, "A suspended", |ev| ended(ev, EndReason::Suspended))?;
+            if blob
+                .windows(a.marker.len())
+                .any(|w| w == a.marker.as_bytes())
+            {
+                return Err("saved session contains plaintext".into());
+            }
+            drop(ca);
+            let grace = wait(&rb, "B sees A away", |ev| match ev {
+                Ev::Peer(PeerEvent::Disconnected { grace_secs }) => Some(*grace_secs),
+                _ => None,
+            })?;
+            if grace < 3600 {
+                return Err(format!("room only holds A for {grace}s"));
+            }
+            // Longer than the relay's (shortened) normal grace period.
+            let away = format!("{} while-away", a.marker);
+            cb.send_text(away.clone(), 0).map_err(|e| e.to_string())?;
+            std::thread::sleep(Duration::from_secs(6));
+            if let Some(ev) = rb
+                .try_iter()
+                .find(|ev| matches!(ev, Ev::State(ChatState::Ended { .. })))
+            {
+                return Err(format!("B's chat ended while A was saved: {ev:?}"));
+            }
+            let (ca2, ra2) = client(&a2);
+            if ca2.resume_saved(blob.clone(), vec![1; 32]).is_ok() {
+                return Err("resumed with the wrong key".into());
+            }
+            ca2.resume_saved(blob, key).map_err(|e| e.to_string())?;
+            wait(&ra2, "A resumed", chatting)?;
+            wait(&rb, "B sees A back", |ev| {
+                matches!(ev, Ev::Peer(PeerEvent::Reconnected)).then_some(())
+            })?;
+            let t = ca2.transcript();
+            if !t.iter().any(|m| m.body == keep && m.from_me) || t.iter().any(|m| m.body == burn) {
+                return Err(format!("restored transcript wrong: {t:?}"));
+            }
+            wait(&ra2, "message sent while A was away", |ev| {
+                matches!(ev, Ev::Msg(m) if m.body == away).then_some(())
+            })?;
+            let p2 = Pair {
+                ca: &ca2,
+                cb: &cb,
+                ra: &ra2,
+                rb: &rb,
+                marker: &a.marker,
+            };
+            p2.exchange(2, "after-resume")?;
+            println!("held {hold}s; saved, quit, resumed after 6s; burn-after-reading not saved");
+            ca2.leave();
+            wait(&rb, "B sees peer left", |ev| ended(ev, EndReason::PeerLeft))?;
+            return Ok(());
         }
         "trusted" => {
             // Earn three good-chat tokens each (this chat and two more).
