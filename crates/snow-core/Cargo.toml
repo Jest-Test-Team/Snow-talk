@@ -26,6 +26,8 @@ snow-psi = { path = "../snow-psi" }
 snow-media = { path = "../snow-media" }
 snow-safety = { path = "../snow-safety" }
 snow-tokens = { path = "../snow-tokens" }
+snow-config = { path = "../snow-config" }
+hex = "0.4.3"
 arti-client = { version = "0.48", default-features = false, features = ["tokio", "rustls", "compression", "static-sqlite"], optional = true }
 base64 = "0.23.1"
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }

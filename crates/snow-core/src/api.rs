@@ -26,8 +26,8 @@ pub struct Config {
     /// only matched with others who did the same. Ignored if the wallet has fewer.
     #[uniffi(default = false)]
     pub trusted: bool,
-    /// Paranoid-mode cover-traffic period in ms. `None` = 1500 ms, `Some(0)` = off.
-    /// Overridden by remote config in production. Ignored unless paranoid is granted.
+    /// Paranoid-mode cover-traffic period in ms. `None` = the remote config's
+    /// value, else 1500 ms; `Some(0)` = off. Ignored unless paranoid is granted.
     #[uniffi(default = None)]
     pub chaff_ms: Option<u32>,
     /// Interest tags (free text, normalized; at most 16 are used). The first one
@@ -49,6 +49,10 @@ pub struct Config {
     /// Base64 SHA-256 SPKI pins for the relay's TLS chain. Empty = no pinning (dev only).
     #[uniffi(default = [])]
     pub pins: Vec<String>,
+    /// Hex Ed25519 public key the remote config must be signed with (compiled
+    /// into the app). `None` = don't fetch remote config (development).
+    #[uniffi(default = None)]
+    pub config_key: Option<String>,
     /// Tor mode: a private app directory for Arti's consensus/guard state.
     /// `None` = direct connections. Requires a build with the `tor` feature.
     #[uniffi(default = None)]
@@ -179,6 +183,28 @@ pub struct MediaInfo {
     pub view_secs: u8,
 }
 
+/// A sponsored card for the waiting screen, chosen on the device from the
+/// whole catalog (the server never learns which one was shown).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct SponsorCard {
+    pub id: String,
+    pub title: String,
+    pub body: String,
+    /// `https://` link with no query string. Opening it is the user's choice and
+    /// tells the sponsor only what any visit would.
+    pub url: String,
+}
+
+/// Feature switches from the signed remote config.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RemoteFeatures {
+    pub version: u64,
+    pub donations: bool,
+    pub lightning: bool,
+    pub voice: bool,
+    pub photos: bool,
+}
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
     #[error("no active chat")]
@@ -217,6 +243,9 @@ pub trait ChatListener: Send + Sync {
     /// Tokens were added or spent: persist [`SnowClient::wallet_export`] now
     /// (Keychain / Keystore). This is the only state the app should keep.
     fn on_wallet_changed(&self);
+    /// While queued: sponsored cards matching our tags (may be empty). Remove
+    /// them once matched.
+    fn on_sponsors(&self, cards: Vec<SponsorCard>);
 }
 
 /// One chat client. A new chat calls [`SnowClient::start_match`] again; every
@@ -367,6 +396,19 @@ impl SnowClient {
         let w = crate::wallet::Wallet::import(&bytes).ok_or(CoreError::BadWallet)?;
         *self.shared.wallet.lock().unwrap() = w;
         Ok(())
+    }
+
+    /// Feature switches from the last valid signed remote config (fetched at the
+    /// start of each match), or `None` if there is none.
+    pub fn remote_features(&self) -> Option<RemoteFeatures> {
+        let r = self.shared.remote.lock().unwrap();
+        r.config(engine::unix_now()).map(|c| RemoteFeatures {
+            version: c.version,
+            donations: c.features.donations,
+            lightning: c.features.lightning,
+            voice: c.features.voice,
+            photos: c.features.photos,
+        })
     }
 
     /// Call from the app lifecycle: cover traffic pauses in the background.

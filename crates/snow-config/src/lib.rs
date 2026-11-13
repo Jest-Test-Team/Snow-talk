@@ -200,6 +200,9 @@ fn one() -> u32 {
 pub struct Catalog {
     pub version: u64,
     pub sponsors: Vec<Sponsor>,
+    /// SHA-256 of the raw bytes this was parsed from (set by [`Catalog::verify`]).
+    #[serde(skip)]
+    pub hash: [u8; 32],
 }
 
 impl Catalog {
@@ -214,6 +217,7 @@ impl Catalog {
             return Err(ConfigError::CatalogHash);
         }
         let mut c: Self = serde_json::from_slice(bytes).map_err(|_| ConfigError::Malformed)?;
+        c.hash = h;
         c.sponsors.retain(|s| valid_link(&s.url) && s.weight > 0);
         for s in &mut c.sponsors {
             s.tags = s

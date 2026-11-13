@@ -1,10 +1,11 @@
 //! Minimal HTTP/1.1 client (one request per connection) over a [`Dialer`].
-//! Only used for two tiny requests (PoW challenge, DoH), so a full HTTP stack
+//! Only used for a few small requests (PoW challenge, DoH, remote config), so a full HTTP stack
 //! isn't worth its size, and this way every byte goes through the same dialer.
 use crate::net::{io_err, Dialer, Endpoint, NetError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const MAX_RESPONSE: u64 = 64 * 1024;
+/// Large enough for the sponsor catalog (`snow_config::MAX_CATALOG`).
+const MAX_RESPONSE: u64 = 320 * 1024;
 
 pub async fn request(
     dialer: &Dialer,

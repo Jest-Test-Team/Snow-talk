@@ -84,6 +84,7 @@ mod tests {
             paranoid: false,
             trusted: false,
             chaff_ms: None,
+            config_key: None,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             adult_tags: adult.iter().map(|s| s.to_string()).collect(),
             require_common_tag: true,

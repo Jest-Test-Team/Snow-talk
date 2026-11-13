@@ -61,6 +61,8 @@ enum EngineError {
     Server(snow_proto::ErrorCode),
     #[error("protocol violation")]
     Protocol,
+    #[error("config_key is not a 32-byte hex key")]
+    BadConfigKey,
     #[cfg(not(feature = "tor"))]
     #[error("{0}")]
     Unsupported(&'static str),
@@ -89,6 +91,8 @@ pub struct Shared {
     pub chat: Arc<PerChat>,
     /// Anonymous tokens (persists across chats; the app saves it).
     pub wallet: Arc<std::sync::Mutex<Wallet>>,
+    /// Last verified remote config and sponsor catalog.
+    pub remote: Arc<std::sync::Mutex<crate::remote::Remote>>,
     /// Bootstrapped once, on the first chat in Tor mode.
     #[cfg(feature = "tor")]
     pub tor: Arc<tokio::sync::OnceCell<crate::tor::TorHandle>>,
@@ -163,6 +167,7 @@ async fn settle(
     mut s: Settle,
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
     wallet: &std::sync::Mutex<Wallet>,
+    remote: &std::sync::Mutex<crate::remote::Remote>,
     l: &dyn ChatListener,
 ) {
     use std::time::Duration;
@@ -212,10 +217,17 @@ async fn settle(
         let mut p = [0u8; 64];
         p[..32].copy_from_slice(&proof[0]);
         p[32..].copy_from_slice(&proof[1]);
+        // The proof binds the tokens to `public_key`. The key must be the one the
+        // signed config lists for this epoch, or (without a config) the first
+        // one we saw: either way the server can't tag us with a key of our own.
+        let listed = remote.lock().unwrap().token_key_ok(
+            snow_config::TokenKind::Good,
+            epoch,
+            &public_key,
+            unix_now(),
+        );
         let mut w = wallet.lock().unwrap();
-        // The proof binds the tokens to `public_key`; pinning the key per epoch
-        // stops the server from tagging us with a key of our own.
-        if w.pin(snow_tokens::Kind::Good, epoch, public_key).is_ok() {
+        if listed != Some(false) && w.pin(snow_tokens::Kind::Good, epoch, public_key).is_ok() {
             if let Ok(tokens) = s.req.finish(&public_key, &evaluated, &p) {
                 w.add(tokens);
                 drop(w);
@@ -258,6 +270,7 @@ pub async fn run(
 ) {
     let per_chat = shared.chat.clone();
     let wallet = shared.wallet.clone();
+    let remote = shared.remote.clone();
     let out = match run_inner(&cfg, &mut cmds, &*l, shared).await {
         Ok(o) => o,
         Err(e) => EndReason::Error {
@@ -269,8 +282,25 @@ pub async fn run(
     per_chat.wipe();
     l.on_state(ChatState::Ended { reason: out.reason });
     if let Some(s) = out.settle {
-        settle(s, &mut cmds, &wallet, &*l).await;
+        settle(s, &mut cmds, &wallet, &remote, &*l).await;
     }
+}
+
+/// Up to three sponsor cards for our (non-adult) tags, picked locally.
+fn sponsors(cfg: &Config, shared: &Shared) -> Vec<SponsorCard> {
+    let r = shared.remote.lock().unwrap();
+    let Some(c) = r.catalog(unix_now()) else {
+        return Vec::new();
+    };
+    c.select(&cfg.tags, 3, rand::random())
+        .into_iter()
+        .map(|s| SponsorCard {
+            id: s.id,
+            title: s.title,
+            body: s.body,
+            url: s.url,
+        })
+        .collect()
 }
 
 fn relay(env: &PeerEnvelope) -> ClientMsg {
@@ -290,6 +320,10 @@ async fn run_inner(
     l.on_state(ChatState::SolvingPow);
     let dialer = dialer(cfg, &shared, l).await?;
     let netw = net::Net::new(base, &cfg.pins, dialer).await?;
+    if let Some(k) = &cfg.config_key {
+        let key = crate::remote::parse_key(k).ok_or(EngineError::BadConfigKey)?;
+        crate::remote::refresh(&netw, &key, &shared.remote, unix_now()).await;
+    }
     let challenge = net::fetch_pow(&netw, bucket).await?;
     let c = snow_pow::Challenge::from_bytes(&challenge).map_err(|_| EngineError::Protocol)?;
     let nonce = tokio::task::spawn_blocking(move || c.solve())
@@ -300,6 +334,7 @@ async fn run_inner(
     // they're sent; once the matchmaker has them they're spent either way.
     let spend = spend_tokens(cfg, &shared, l);
     l.on_state(ChatState::Queued);
+    l.on_sponsors(sponsors(cfg, &shared));
     let mut mm = Ws::connect(&netw, "/match", &format!("b.{bucket}")).await?;
     mm.send(&ClientMsg::Join {
         pow: snow_proto::PowSolution { challenge, nonce },
@@ -338,7 +373,10 @@ async fn run_inner(
     let mut outbox: Vec<Cmd> = Vec::new();
     // Without a paranoid grant there is no cover traffic: the room would rate-limit
     // it, and idle rooms must be able to hibernate.
-    let mut pacer = Pacer::new(if paranoid { cfg.chaff_ms } else { Some(0) });
+    let chaff_ms = cfg
+        .chaff_ms
+        .or_else(|| shared.remote.lock().unwrap().chaff_ms(unix_now()));
+    let mut pacer = Pacer::new(if paranoid { chaff_ms } else { Some(0) });
     let mut foreground = true;
 
     loop {

@@ -6,7 +6,7 @@
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
 //!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|safety|goodchat|report|trusted|grace]
 //!                    [--tag TEXT]... [--nick NAME]
-//!                    [--paranoid] [--chaff MS]
+//!                    [--paranoid] [--chaff MS] [--config-key HEX]
 //! ```
 //! `pair-test` runs two clients in one process, pairs them, exchanges messages in
 //! both directions, checks that the SAS matches, and exits non-zero on failure.
@@ -31,6 +31,11 @@
 //!   (double-spent) wallet is refused and lands in the normal queue
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
+//! * `config`    — with `--config-key`: the signed config and sponsor catalog are
+//!   fetched and verified, a sponsor matching the shared tag is picked locally,
+//!   and tokens under the pinned issuer key are accepted
+//! * `config-tagging` — the config pins issuer keys the relay doesn't use (as a
+//!   relay tagging users with its own keys would): tokens must be refused
 use snow_core::*;
 use std::io::BufRead;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -51,8 +56,20 @@ enum Ev {
     Wallet,
 }
 
+/// Sponsor ids each client was shown while queued (the event arrives before
+/// pairing, where `wait` would discard it).
+static SPONSORS: std::sync::Mutex<Vec<Vec<String>>> = std::sync::Mutex::new(Vec::new());
+
 struct Chan(Sender<Ev>);
 impl ChatListener for Chan {
+    fn on_sponsors(&self, cards: Vec<SponsorCard>) {
+        if !cards.is_empty() {
+            SPONSORS
+                .lock()
+                .unwrap()
+                .push(cards.into_iter().map(|c| c.id).collect());
+        }
+    }
     fn on_state(&self, s: ChatState) {
         let _ = self.0.send(Ev::State(s));
     }
@@ -101,6 +118,7 @@ struct Args {
     nick: Option<String>,
     pins: Vec<String>,
     tor_dir: Option<String>,
+    config_key: Option<String>,
 }
 
 fn args() -> Args {
@@ -119,6 +137,7 @@ fn args() -> Args {
         nick: None,
         pins: Vec::new(),
         tor_dir: None,
+        config_key: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -142,6 +161,7 @@ fn args() -> Args {
             "--tor" => a.tor_dir = Some(it.next().expect("--tor DIR")),
             "--pin" => a.pins.push(it.next().expect("--pin BASE64")),
             "--paranoid" => a.paranoid = true,
+            "--config-key" => a.config_key = Some(it.next().expect("--config-key HEX")),
             "--tag" => a.tags.push(it.next().expect("--tag TEXT")),
             "--nick" => a.nick = Some(it.next().expect("--nick NAME")),
             "--chaff" => {
@@ -178,6 +198,7 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
             }),
             pins: a.pins.clone(),
             tor_dir: a.tor_dir.clone(),
+            config_key: a.config_key.clone(),
         },
         Arc::new(Chan(tx)),
     );
@@ -292,6 +313,10 @@ fn pair_test(a: &Args) -> Result<(), String> {
             b2.tags = ["Cats", "chess", "#Hiking"].map(String::from).to_vec();
             a2.nick = Some("雪人".into());
             b2.nick = Some("Bob".into());
+        }
+        "config" | "config-tagging" => {
+            a2.tags = vec!["Coffee".into()];
+            b2.tags = vec!["coffee".into()];
         }
         "disjoint" => {
             // Forced into one bucket, but nothing in common.
@@ -597,6 +622,42 @@ fn pair_test(a: &Args) -> Result<(), String> {
             fresh.wallet_import(saved).map_err(|e| e.to_string())?;
             if fresh.good_tokens() != 1 {
                 return Err("wallet import lost tokens".into());
+            }
+        }
+        "config" | "config-tagging" => {
+            if a.config_key.is_none() {
+                return Err("needs --config-key".into());
+            }
+            let f = ca.remote_features().ok_or("no valid remote config")?;
+            println!("remote config v{} {f:?}", f.version);
+            let shown = SPONSORS.lock().unwrap().clone();
+            if shown.len() != 2
+                || !shown
+                    .iter()
+                    .all(|ids| ids.first().map(String::as_str) == Some("cafe"))
+            {
+                return Err(format!(
+                    "expected the coffee sponsor first on both sides, got {shown:?}"
+                ));
+            }
+            println!("sponsors picked on-device: {shown:?}");
+            std::thread::sleep(Duration::from_millis(1500));
+            pair.exchange(1, "before-leave")?;
+            ca.leave();
+            wait(&rb, "B sees peer left", |ev| ended(ev, EndReason::PeerLeft))?;
+            let tagging = a.scenario == "config-tagging";
+            if tagging {
+                // Give the settle phase time to receive (and refuse) the tokens.
+                std::thread::sleep(Duration::from_secs(3));
+            } else {
+                wallet_event(&ra, "A's token")?;
+                wallet_event(&rb, "B's token")?;
+            }
+            let (ta, tb) = (ca.good_tokens(), cb.good_tokens());
+            println!("tokens: A={ta} B={tb}");
+            let want = u32::from(!tagging);
+            if (ta, tb) != (want, want) {
+                return Err(format!("expected {want} token each, got A={ta} B={tb}"));
             }
         }
         "trusted" => {
