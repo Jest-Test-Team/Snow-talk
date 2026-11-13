@@ -140,3 +140,49 @@ pub enum PeerEnvelope {
         body: Vec<u8>,
     },
 }
+
+/// Store a purchase proof comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Store {
+    /// StoreKit 2 signed transaction (`jwsRepresentation`).
+    Apple,
+    /// Play Billing purchase token (not supported by the relay yet).
+    Google,
+}
+
+/// Body of `POST /tokens/vip` (postcard): trade one purchase for blind VIP tokens.
+/// `blinded` should hold `snow_tokens::MAX_BATCH` elements; the relay evaluates
+/// as many as the purchase is worth, from the front. Retrying the same
+/// purchase with the same `blinded` is answered again; anything else is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VipRequest {
+    pub store: Store,
+    /// Token epoch the client blinded for (current or previous).
+    pub epoch: u32,
+    pub proof: String,
+    pub blinded: Vec<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VipRefusal {
+    /// Not a genuine store proof.
+    Invalid,
+    /// Genuine, but not a VIP product of this app (or refunded / sandbox).
+    NotEligible,
+    /// This purchase was already exchanged for other tokens.
+    AlreadyRedeemed,
+    /// The store isn't supported yet.
+    Unsupported,
+}
+
+/// Response of `POST /tokens/vip` (postcard, always HTTP 200).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VipResponse {
+    Tokens {
+        epoch: u32,
+        public_key: [u8; 32],
+        evaluated: Vec<[u8; 32]>,
+        proof: [[u8; 32]; 2],
+    },
+    Refused(VipRefusal),
+}

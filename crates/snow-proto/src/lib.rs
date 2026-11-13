@@ -23,4 +23,7 @@ pub use inner::{
     decode_inner, encode_inner, Inner, InnerError, MediaKind, Profile, INNER_LEN,
     MAX_PROFILE_FIELD, MAX_TEXT_LEN,
 };
-pub use msg::{ClientMsg, ErrorCode, Handshake, PeerEnvelope, PowSolution, Role, ServerMsg};
+pub use msg::{
+    ClientMsg, ErrorCode, Handshake, PeerEnvelope, PowSolution, Role, ServerMsg, Store, VipRefusal,
+    VipRequest, VipResponse,
+};

@@ -3,7 +3,8 @@ main = "build/worker/shim.mjs"
 compatibility_date = "2026-10-01"
 
 [build]
-command = "worker-build --release"
+# SNOW_BUILD_ARGS is only set by scripts/e2e.sh (test-only cargo features).
+command = "worker-build --release $SNOW_BUILD_ARGS"
 
 [vars]
 POW_DIFFICULTY = "23"
@@ -16,6 +17,10 @@ TRUSTED_MIN = "3"
 TRUSTED_EXCLUSIVE_SECS = "30"
 # 24 h room hold (saved sessions): "open" = anyone (dev); else one VIP token.
 EXTEND_GRANT = "token"
+# App Store products that buy VIP tokens: "product_id:tokens,..." (≤ 16 each).
+APPLE_BUNDLE_ID = "app.snowtalk.ios"
+APPLE_PRODUCTS = ""
+APPLE_SANDBOX = "false"
 
 [[durable_objects.bindings]]
 name = "MATCHMAKER"
@@ -39,9 +44,17 @@ bucket_name = "snow-talk-public"
 tag = "v1"
 new_sqlite_classes = ["Matchmaker", "ChatRoom"]
 
+[[durable_objects.bindings]]
+name = "REDEMPTIONS"
+class_name = "Redemptions"
+
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["Nullifiers"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["Redemptions"]
 
 # Logging policy: request metadata (which includes client IPs) is never collected.
 # Code only logs lifecycle event names; see src/util.rs `event()`.

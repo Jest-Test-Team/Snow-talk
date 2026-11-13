@@ -3,6 +3,7 @@
 //! * `GET /pow`   (header `x-snow-bucket: <b>`)     → proof-of-work challenge (57 raw bytes)
 //! * `GET /match` (subprotocols `snowtalk.v1, b.<b>`) → WebSocket to the Matchmaker shard
 //! * `GET /room`  (subprotocols `snowtalk.v1, t.<ticket>`) → WebSocket to the ChatRoom
+//! * `POST /tokens/vip` → exchange an App Store purchase for blind VIP tokens
 //! * `GET /config`, `GET /catalog` → the offline-signed remote config and the
 //!   sponsor catalog, served verbatim from R2. The relay holds no signing key: it
 //!   can withhold a config but not forge one (see `snow-config`).
@@ -14,6 +15,7 @@
 //! Logging policy: never log payloads, IPs, tickets or room IDs. Only lifecycle
 //! events (`room_created`, `room_closed`, ...) are logged, and the log line's own
 //! timestamp is the only time information.
+pub mod iap;
 pub mod ticket;
 
 #[cfg(target_arch = "wasm32")]
@@ -24,9 +26,11 @@ mod nullifiers;
 mod room;
 #[cfg(target_arch = "wasm32")]
 mod util;
+#[cfg(target_arch = "wasm32")]
+mod vip;
 
 #[cfg(target_arch = "wasm32")]
-pub use {matchmaker::Matchmaker, nullifiers::Nullifiers, room::ChatRoom};
+pub use {matchmaker::Matchmaker, nullifiers::Nullifiers, room::ChatRoom, vip::Redemptions};
 
 /// WebSocket subprotocol both sides must agree on.
 pub const PROTOCOL: &str = "snowtalk.v1";
@@ -117,6 +121,7 @@ mod entry {
                 )?;
                 stub.fetch_with_request(fwd).await
             }
+            (Method::Post, "/tokens/vip") => vip::handle(req, &env).await,
             (Method::Get, "/config") => public_object(&env, "config.bin").await,
             (Method::Get, "/catalog") => public_object(&env, "catalog.json").await,
             _ => Response::error("not found", 404),

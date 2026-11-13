@@ -143,6 +143,12 @@ fn to32(b: &[u8]) -> Result<[u8; 32], TokenError> {
 }
 
 impl Request {
+    /// Keep only the first `n` items, when the issuer evaluated fewer than
+    /// were asked for (e.g. a purchase worth fewer tokens than `MAX_BATCH`).
+    pub fn truncate(&mut self, n: usize) {
+        self.items.truncate(n);
+    }
+
     /// Verify the issuer's proof against `public_key` (the key published for
     /// this kind and epoch) and unblind the tokens.
     pub fn finish(
@@ -280,6 +286,17 @@ mod tests {
         let (ev, proof) = iss.issue(&blinded, seed()).unwrap();
         let toks = req.finish(&iss.public_key(), &ev, &proof).unwrap();
         (iss, toks)
+    }
+
+    #[test]
+    fn partial_issuance_from_the_front() {
+        let iss = Issuer::new(b"master", Kind::Vip, 7).unwrap();
+        let (mut req, blinded) = request(Kind::Vip, 7, MAX_BATCH, seed()).unwrap();
+        let (ev, proof) = iss.issue(&blinded[..5], seed()).unwrap();
+        req.truncate(5);
+        let toks = req.finish(&iss.public_key(), &ev, &proof).unwrap();
+        assert_eq!(toks.len(), 5);
+        assert!(toks.iter().all(|t| iss.verify(t)));
     }
 
     #[test]
