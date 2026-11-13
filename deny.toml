@@ -27,9 +27,6 @@ ignore = [
     # rsa Marvin timing attack: needs private-key decrypt/sign. Arti only uses RSA
     # to *verify* relay identities (public key), so the attack doesn't apply.
     { id = "RUSTSEC-2023-0071", reason = "arti uses RSA for public-key verification only" },
-    # Bundled SQLite CVE, pinned by tor-dirmgr 0.48 (rusqlite 0.40). Used only for
-    # Arti's local directory cache; Tor mode is opt-in. Remove once arti ships rusqlite >= 0.41.
-    { id = "RUSTSEC-2026-0459", reason = "pinned by arti 0.48; local Tor dir cache only; tracked in docs/progress.md" },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but stable (build-time macro, via arti)" },
     { id = "RUSTSEC-2026-0374", reason = "basic-toml via uniffi bindgen (`bindgen` feature, build tool only)" },
 ]

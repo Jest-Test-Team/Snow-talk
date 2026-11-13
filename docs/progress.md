@@ -87,7 +87,7 @@ and Android Studio with the SDK, NDK, and cmdline-tools before Phase 3.
 - rustls's crypto backend moved from ring to **aws-lc-rs** (needed for HPKE/ECH). Mobile builds now need `cmake` (Phase 3 prerequisite).
 - reqwest was removed. A minimal HTTP/1.1 client (`http.rs`) means nothing can bypass the dialer.
 - Upgraded hickory-proto 0.25 → 0.26 because of DNS parsing advisories.
-- ⚠️ **Known issue:** the `tor` feature pulls in a bundled SQLite with an open CVE (RUSTSEC-2026-0459), pinned by arti 0.48. It's ignored in `deny.toml` with a justification. **Re-check on every arti upgrade.**
+- ~~⚠️ Known issue: bundled SQLite CVE (RUSTSEC-2026-0459) pinned by arti 0.48.~~ **Resolved (2026-11-13):** `vendor/libsqlite3-sys` = upstream 0.38.2 + the SQLite 3.54.1 amalgamation from 0.39.1, wired via `[patch.crates-io]`. The `deny.toml` ignore is removed; CI runs `scripts/check-vendor.sh` (SQLite ≥ 3.54.0 and the patch is actually used). Verified: Tor bootstrap with a fresh `dir.sqlite3` works, ECH still on. Drop the vendor copy once arti uses rusqlite ≥ 0.41.
 - Not yet verified: pairing end to end *over Tor*. That needs a deployed relay (localhost isn't reachable from an exit), plus the Cloudflare WAF rule that lets Tor exits through without a challenge.
 
 ### ⚠️ Cost finding: chaff disables Durable Object hibernation

@@ -1195,7 +1195,7 @@ dependencies = [
  "quote",
  "sha3",
  "strum",
- "syn 3.0.10",
+ "syn 2.0.119",
  "unicode-ident",
  "void",
 ]
@@ -2532,9 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+version = "0.38.3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -4351,7 +4349,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
