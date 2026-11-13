@@ -3,6 +3,7 @@
 name: SnowTalk
 options:
   bundleIdPrefix: app.snowtalk
+  developmentLanguage: en
   deploymentTarget:
     iOS: "15.0"
 settings:
@@ -28,5 +29,7 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        # Needed to reach a development relay on the local network.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Connect to a Snow-talk relay on your local network (development)."
         TARGETED_DEVICE_FAMILY: "1"
         ENABLE_BITCODE: NO

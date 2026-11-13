@@ -1,12 +1,28 @@
 import SwiftUI
+import UIKit
 
-/// Shell: proves the Rust core links and loads. The chat UI comes in Phase 3.
 @main
 struct SnowTalkApp: App {
+    @StateObject private var model = ChatModel()
+    @Environment(\.scenePhase) private var phase
+
     var body: some Scene {
         WindowGroup {
-            Text("Snow-talk · core \(version())")
-                .padding()
+            ZStack {
+                RootView(model: model)
+                // App-switcher snapshots and glances see a blank cover (Phase 6).
+                if phase != .active {
+                    Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+                    Text("Snow-talk").font(.title.bold())
+                }
+            }
+            .onChange(of: phase) { p in model.setVisible(p == .active) }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
+                model.screenCaptured()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
+                if UIScreen.main.isCaptured { model.screenCaptured() }
+            }
         }
     }
 }
