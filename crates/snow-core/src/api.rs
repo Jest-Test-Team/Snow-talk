@@ -1,5 +1,6 @@
 use crate::engine::PerChat;
 use crate::engine::{self, Cmd};
+use crate::screening::Safety;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -114,6 +115,34 @@ pub struct UserProfile {
     pub adult_ok: bool,
 }
 
+/// On-device screening result for a received message (never sent anywhere).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SafetyLevel {
+    Clean,
+    /// Show with a warning ("對方可能想引導你到其他平台／談錢").
+    Caution,
+    /// Blur until tapped: "此訊息可能含有不當內容，點擊以檢視".
+    Blur,
+}
+
+/// Why a message was flagged, so the UI can explain it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum SafetyFlag {
+    Link,
+    Shortener,
+    LineId,
+    Telegram,
+    Phone,
+    Email,
+    Crypto,
+    Wallet,
+    Investment,
+    MoneyTransfer,
+    GiftCard,
+    Gambling,
+    Solicitation,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ChatMessage {
     /// Unique per side: `(id, from_me)` identifies a message.
@@ -121,6 +150,9 @@ pub struct ChatMessage {
     pub from_me: bool,
     pub body: String,
     pub ttl_secs: u32,
+    /// Always `Clean` for our own messages.
+    pub safety: SafetyLevel,
+    pub safety_flags: Vec<SafetyFlag>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -245,7 +277,7 @@ impl SnowClient {
             .transcript
             .lock()
             .unwrap()
-            .push(id, true, body, ttl_secs);
+            .push(id, true, body, ttl_secs, Safety::clean());
         Ok(id)
     }
 

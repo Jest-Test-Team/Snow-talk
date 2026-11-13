@@ -548,18 +548,21 @@ impl Chat {
         match inner {
             Inner::Text { id, body, ttl_secs } => {
                 let body = Zeroizing::new(body);
+                let safety = crate::screening::screen(&body);
                 let msg = ChatMessage {
                     id,
                     from_me: false,
                     body: body.to_string(),
                     ttl_secs,
+                    safety: safety.level,
+                    safety_flags: safety.flags.clone(),
                 };
                 self.shared
                     .chat
                     .transcript
                     .lock()
                     .unwrap()
-                    .push(id, false, body, ttl_secs);
+                    .push(id, false, body, ttl_secs, safety);
                 l.on_message(msg);
             }
             Inner::ScreenCaptured => l.on_peer(PeerEvent::ScreenCaptured),

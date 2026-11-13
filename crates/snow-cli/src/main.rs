@@ -4,7 +4,7 @@
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
-//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|grace]
+//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|safety|grace]
 //!                    [--tag TEXT]... [--nick NAME]
 //!                    [--paranoid] [--chaff MS]
 //! ```
@@ -23,6 +23,7 @@
 //! * `tags`      — PSI finds exactly the shared tags on both sides; profiles arrive
 //! * `disjoint`  — same bucket, no shared tags: both leave with `NoCommonTags`
 //! * `media`     — a flash photo with GPS EXIF arrives clean, opens once, burns
+//! * `safety`    — a scam pitch arrives blurred with reasons; small talk stays clean
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
@@ -208,7 +209,8 @@ fn chat(a: &Args) {
                 }
                 Ev::State(s) => println!("* {s:?}"),
                 Ev::Sas(e) => println!("* verify with your peer: {}", e.join(" ")),
-                Ev::Msg(m) => println!("< {}", m.body),
+                Ev::Msg(m) if m.safety == SafetyLevel::Clean => println!("< {}", m.body),
+                Ev::Msg(m) => println!("< [{:?} {:?}] {}", m.safety, m.safety_flags, m.body),
                 Ev::Peer(p) => println!("* peer: {p:?}"),
                 Ev::Burn(id, mine) => println!("* burned #{id} (mine: {mine})"),
                 Ev::Common(t) if t.is_empty() => println!("* no interests in common"),
@@ -530,6 +532,26 @@ fn pair_test(a: &Args) -> Result<(), String> {
             })?;
             println!("opened once, metadata-free, burned after {:?}", t.elapsed());
             pair.exchange(1, "after-media")?;
+        }
+        "safety" => {
+            for (text, want) in [
+                ("老師帶單保證獲利，加賴 abc", SafetyLevel::Blur),
+                ("你好，今天好冷", SafetyLevel::Clean),
+            ] {
+                ca.send_text(text.into(), 0).map_err(|e| e.to_string())?;
+                let m = wait(&rb, "screened message", |ev| match ev {
+                    Ev::Msg(m) if m.body == text => Some(m.clone()),
+                    _ => None,
+                })?;
+                if m.safety != want {
+                    return Err(format!("{text}: {:?} {:?}", m.safety, m.safety_flags));
+                }
+                let stored = cb.transcript().into_iter().find(|t| t.body == text);
+                if stored.map(|s| s.safety) != Some(want) {
+                    return Err("transcript lost the safety verdict".into());
+                }
+                println!("{text:?} → {:?} {:?}", m.safety, m.safety_flags);
+            }
         }
         "grace" => {
             ca.panic_wipe();

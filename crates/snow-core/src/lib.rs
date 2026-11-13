@@ -16,6 +16,7 @@ mod media;
 mod net;
 mod pacer;
 mod pin;
+mod screening;
 #[cfg(feature = "tor")]
 mod tor;
 mod transcript;

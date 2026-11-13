@@ -10,6 +10,7 @@
 //! the receiver's when it arrives. Swift/Kotlin strings handed to the UI can't be
 //! zeroized; that is a documented best-effort limit.
 use crate::api::ChatMessage;
+use crate::screening::Safety;
 use std::time::Duration;
 use tokio::time::Instant;
 use zeroize::Zeroizing;
@@ -23,6 +24,7 @@ struct Entry {
     body: Zeroizing<String>,
     ttl_secs: u32,
     burn_at: Option<Instant>,
+    safety: Safety,
 }
 
 #[derive(Default)]
@@ -31,7 +33,14 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    pub fn push(&mut self, id: u64, from_me: bool, body: Zeroizing<String>, ttl_secs: u32) {
+    pub fn push(
+        &mut self,
+        id: u64,
+        from_me: bool,
+        body: Zeroizing<String>,
+        ttl_secs: u32,
+        safety: Safety,
+    ) {
         let burn_at = (ttl_secs > 0).then(|| Instant::now() + Duration::from_secs(ttl_secs as u64));
         if self.items.len() == MAX_MESSAGES {
             self.items.remove(0);
@@ -42,6 +51,7 @@ impl Transcript {
             body,
             ttl_secs,
             burn_at,
+            safety,
         });
     }
 
@@ -74,6 +84,8 @@ impl Transcript {
                 from_me: e.from_me,
                 body: e.body.to_string(),
                 ttl_secs: e.ttl_secs,
+                safety: e.safety.level,
+                safety_flags: e.safety.flags.clone(),
             })
             .collect()
     }
@@ -105,9 +117,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn burns_only_expired_messages() {
         let mut t = Transcript::default();
-        t.push(1, true, z("keep"), 0);
-        t.push(2, false, z("short"), 5);
-        t.push(3, true, z("long"), 60);
+        t.push(1, true, z("keep"), 0, Safety::clean());
+        t.push(2, false, z("short"), 5, Safety::clean());
+        t.push(3, true, z("long"), 60, Safety::clean());
         assert_eq!(
             t.next_burn().unwrap() - Instant::now(),
             Duration::from_secs(5)
@@ -130,7 +142,7 @@ mod tests {
     fn caps_size_and_ids_are_per_side() {
         let mut t = Transcript::default();
         for i in 0..MAX_MESSAGES as u64 + 5 {
-            t.push(i, i % 2 == 0, z("x"), 0);
+            t.push(i, i % 2 == 0, z("x"), 0, Safety::clean());
         }
         assert_eq!(t.len(), MAX_MESSAGES);
         assert_eq!(t.snapshot()[0].id, 5);

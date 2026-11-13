@@ -1,0 +1,12 @@
+[package]
+name = "snow-safety"
+description = "On-device message screening: scam / off-platform-contact rules (zh-Hant first)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+regex = { version = "1.11", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+unicode-normalization = "0.1"

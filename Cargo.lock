@@ -4161,6 +4161,7 @@ dependencies = [
  "snow-pow",
  "snow-proto",
  "snow-psi",
+ "snow-safety",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -4229,6 +4230,14 @@ dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
  "zeroize",
+]
+
+[[package]]
+name = "snow-safety"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "unicode-normalization",
 ]
 
 [[package]]

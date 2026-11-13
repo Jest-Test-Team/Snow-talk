@@ -10,7 +10,7 @@ WRANGLER=$!
 trap 'kill $WRANGLER 2>/dev/null; pkill -f "wrangler dev --port 8787" 2>/dev/null || true' EXIT
 for _ in $(seq 1 90); do grep -q "Ready on" "$LOG" && break; sleep 2; done
 cargo build -q -p snow-cli
-for s in basic reconnect rotate chaff free flood burn tags disjoint media grace; do
+for s in basic reconnect rotate chaff free flood burn tags disjoint media safety grace; do
   echo "== scenario: $s"
   ./target/debug/snow-cli pair-test --messages "${MESSAGES:-3}" --marker "$MARKER" --scenario "$s"
 done
