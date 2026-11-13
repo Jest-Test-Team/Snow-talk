@@ -97,7 +97,7 @@ Options: (a) accept it as the cost of strong cover traffic; (b) chaff period > 1
 **Decision (2026-11-13): (c)+(d) — chaff is the VIP "paranoid mode".** Implemented:
 - `Join { paranoid }` request → the matchmaker grants it (`PARANOID_GRANT=open` in dev/beta; production `token` = denied until Phase 10 VIP tokens) → the grant is a signed `flags` bit in the room ticket and carried into resume/rotation tickets → `Matched { paranoid }` / `ChatState::Handshaking { paranoid }` tell the client.
 - The client sends chaff only when granted (`chaff_ms` clamped to ≥ 250 ms). Without it there's no cover traffic, so idle rooms hibernate. Padding (4096 B) and the 0–300 ms send jitter still apply to everyone; free mode also spaces bursts ≥ 500 ms apart.
-- **Server-side enforcement**, since the client is open source: per-slot token-bucket cap in the ChatRoom (free: burst 20, 2/s; paranoid: burst 40, 5/s). Over-cap frames are dropped with `Error(RateLimited)` (non-fatal; Olm tolerates gaps). A modified free client can still run slow (≤ 2/s) chaff and keep its room awake — the cost is bounded per room, so this is accepted.
+- **Server-side enforcement**, since the client is open source: per-slot token-bucket cap in the ChatRoom (free: burst 20, 2/s; paranoid: burst 40, 5/s — *raised in Phase 8 to free 48/4 s⁻¹, paranoid 64/6 s⁻¹ so a flash photo fits in one burst*). Over-cap frames are dropped with `Error(RateLimited)` (non-fatal; Olm tolerates gaps). A modified free client can still run slow (≤ 2/s) chaff and keep its room awake — the cost is bounded per room, so this is accepted.
 - E2E: the `chaff` (granted), `free` (0 idle frames, 12-message burst never limited) and `flood` (83/100 dropped, chat survives) scenarios pass; production policy denies the request.
 - Privacy note: the matchmaker learns one bit ("this user asked for/holds the perk"). In Phase 10 it will come from an unlinkable blind token.
 
@@ -128,3 +128,18 @@ Options: (a) accept it as the cost of strong cover traffic; (b) chaff period > 1
 - PSI limits (written in the crate docs): a dishonest peer can probe up to 16 chosen tags per chat, and can lie about the result.
 - Age self-declaration UI for adult tags belongs to the native app (Phase 3/6).
 - Users near a week boundary may hash to different buckets for a moment (negligible).
+
+## Phase 8 — Flash photos & voice notes (Rust part done 2026-11-13)
+
+**Plan vs. done**
+- ✅ **Metadata stripping by re-encoding** (`snow-media`): the image is fully decoded (JPEG/PNG/WebP/GIF, with decode-size limits), EXIF orientation is applied to the pixels, it's scaled to ≤ 1280 px and written as a fresh JPEG ≤ 120 KB (lower quality, then smaller size, until it fits). Tests put GPS EXIF, a PNG `tEXt` chunk and trailing data in; none of it comes out.
+- ✅ **One `MediaKey` per item** (ChaCha20-Poly1305, single-use key, AAD = media id ‖ kind, so chunks can't be spliced between items). The key travels in an Olm-encrypted `MediaOffer`, and the ciphertext goes as 3 KB `MediaChunk`s, each in one fixed 4 KB frame.
+- ✅ **Sharing the send path**: chunks go into the pacer's *bulk* queue behind text and control messages. Free mode sends them as one token-bucket burst (a 320×240 photo arrived in 27 ms in E2E). In paranoid mode they replace chaff ticks, so they're slow on purpose, as the plan says.
+- ✅ **Flash burn**: the receiver keeps only ciphertext. `open_media` decrypts **once**, destroys the key and ciphertext, sends `MediaBurned` (the sender gets `on_media_burned(id, true)`) and starts the view timer (`view_secs` 1–10, default 3). When it expires → `on_media_burned(id, false)`. Opening a second time → `MediaGone`.
+- ✅ **RAM only**: nothing is written to disk anywhere in the Rust path. Limits: 4 items in flight and 16 unopened per chat; a bad chunk poisons its item.
+- ✅ E2E `media`: a photo with GPS EXIF arrives clean (320×240), opens once, the sender is notified, and it burns after 2 s.
+- ⏳ **Native**: hold-to-view UI; iOS converts HEIC to JPEG before `send_image` (the Rust decoder has no HEIC); audio recording and encoding in memory (AVAudioRecorder → AAC / MediaRecorder → Opus).
+
+**Deviations**
+- No `opus` crate: it needs C libopus. Voice is platform-encoded and treated as opaque sealed bytes. Recorded audio has no EXIF-like location metadata, but the native layer must not write container tags.
+- The free-mode pacer changed from a fixed 500 ms gap to a token bucket (burst 40, 3.5/s), kept just under the room's raised caps.
