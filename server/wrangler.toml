@@ -10,6 +10,10 @@ POW_DIFFICULTY = "23"
 # Paranoid mode (constant cover traffic) keeps rooms from hibernating, so it is a
 # VIP perk. "open" = grant to anyone (dev/beta); anything else = token required.
 PARANOID_GRANT = "token"
+# Good-chat tokens needed for the trusted queue, and how long a trusted waiter
+# is reserved for other trusted users before anyone may be matched with them.
+TRUSTED_MIN = "3"
+TRUSTED_EXCLUSIVE_SECS = "30"
 
 [[durable_objects.bindings]]
 name = "MATCHMAKER"
@@ -19,9 +23,17 @@ class_name = "Matchmaker"
 name = "CHATROOM"
 class_name = "ChatRoom"
 
+[[durable_objects.bindings]]
+name = "NULLIFIERS"
+class_name = "Nullifiers"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Matchmaker", "ChatRoom"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Nullifiers"]
 
 # Logging policy: request metadata (which includes client IPs) is never collected.
 # Code only logs lifecycle event names; see src/util.rs `event()`.

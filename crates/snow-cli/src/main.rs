@@ -4,7 +4,7 @@
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
-//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|safety|goodchat|report|grace]
+//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|safety|goodchat|report|trusted|grace]
 //!                    [--tag TEXT]... [--nick NAME]
 //!                    [--paranoid] [--chaff MS]
 //! ```
@@ -27,6 +27,8 @@
 //! * `goodchat`  — after a real chat both sides earn one unlinkable token
 //! * `report`    — A leaves, B reports A in the window: only B earns a token
 //!   (run the relay with short `GOOD_AFTER_SECS` / `REPORT_SECS`)
+//! * `trusted`   — earn 3 tokens each, then meet in the trusted queue; a replayed
+//!   (double-spent) wallet is refused and lands in the normal queue
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
@@ -94,6 +96,7 @@ struct Args {
     rotation_secs: Option<u32>,
     chaff_ms: Option<u32>,
     paranoid: bool,
+    trusted: bool,
     tags: Vec<String>,
     nick: Option<String>,
     pins: Vec<String>,
@@ -111,6 +114,7 @@ fn args() -> Args {
         rotation_secs: None,
         chaff_ms: None,
         paranoid: false,
+        trusted: false,
         tags: Vec::new(),
         nick: None,
         pins: Vec::new(),
@@ -163,6 +167,7 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
             rotation_secs: a.rotation_secs,
             chaff_ms: a.chaff_ms,
             paranoid: a.paranoid,
+            trusted: a.trusted,
             tags: a.tags.clone(),
             adult_tags: Vec::new(),
             require_common_tag: true,
@@ -310,7 +315,7 @@ fn pair_test(a: &Args) -> Result<(), String> {
         }
     };
     let granted = wait(&ra, "A handshaking", |ev| match ev {
-        Ev::State(ChatState::Handshaking { paranoid }) => Some(*paranoid),
+        Ev::State(ChatState::Handshaking { paranoid, .. }) => Some(*paranoid),
         _ => None,
     })?;
     if granted != a2.paranoid {
@@ -593,6 +598,74 @@ fn pair_test(a: &Args) -> Result<(), String> {
             if fresh.good_tokens() != 1 {
                 return Err("wallet import lost tokens".into());
             }
+        }
+        "trusted" => {
+            // Earn three good-chat tokens each (this chat and two more).
+            for round in 0..3 {
+                if round > 0 {
+                    ca.start_match();
+                    cb.start_match();
+                    wait(&ra, "A chatting", chatting)?;
+                    wait(&rb, "B chatting", chatting)?;
+                }
+                std::thread::sleep(Duration::from_millis(1500));
+                pair.exchange(1, &format!("earn{round}"))?;
+                ca.leave();
+                wait(&rb, "B sees peer left", |ev| ended(ev, EndReason::PeerLeft))?;
+                wallet_event(&rb, "B's token")?;
+                wallet_event(&ra, "A's token")?;
+            }
+            if (ca.good_tokens(), cb.good_tokens()) != (3, 3) {
+                return Err(format!(
+                    "earned {} / {}",
+                    ca.good_tokens(),
+                    cb.good_tokens()
+                ));
+            }
+            let replay = ca.wallet_export();
+            let mut ta = a2.clone();
+            ta.trusted = true;
+            let (xa, rxa) = client(&ta);
+            let (xb, rxb) = client(&ta);
+            xa.wallet_import(ca.wallet_export())
+                .map_err(|e| e.to_string())?;
+            xb.wallet_import(cb.wallet_export())
+                .map_err(|e| e.to_string())?;
+            xa.start_match();
+            xb.start_match();
+            for (rx, who) in [(&rxa, "A"), (&rxb, "B")] {
+                let t = wait(rx, "trusted handshake", |ev| match ev {
+                    Ev::State(ChatState::Handshaking { trusted, .. }) => Some(*trusted),
+                    _ => None,
+                })?;
+                if !t {
+                    return Err(format!("{who} was not placed in the trusted queue"));
+                }
+            }
+            if (xa.good_tokens(), xb.good_tokens()) != (0, 0) {
+                return Err("tokens were not spent".into());
+            }
+            println!("3 tokens each → matched in the trusted queue");
+            xa.leave();
+            xb.leave();
+            // Replaying A's old wallet: the nullifiers are already spent.
+            let (xc, rxc) = client(&ta);
+            xc.wallet_import(replay).map_err(|e| e.to_string())?;
+            let (xd, rxd) = client(&a2);
+            xc.start_match();
+            std::thread::sleep(Duration::from_millis(500));
+            xd.start_match();
+            let t = wait(&rxc, "replay handshake", |ev| match ev {
+                Ev::State(ChatState::Handshaking { trusted, .. }) => Some(*trusted),
+                _ => None,
+            })?;
+            wait(&rxd, "partner handshake", |ev| {
+                matches!(ev, Ev::State(ChatState::Handshaking { .. })).then_some(())
+            })?;
+            if t {
+                return Err("double-spent tokens were accepted".into());
+            }
+            println!("replayed tokens refused; matched normally instead");
         }
         "grace" => {
             ca.panic_wipe();

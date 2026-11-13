@@ -26,8 +26,6 @@ pub enum PinError {
     KeyChanged,
 }
 
-// `take`/`prune` are used by trusted-queue spending (next step).
-#[allow(dead_code)]
 impl Wallet {
     /// Accept `pk` for `(kind, epoch)` if it is new or matches what we saw before.
     pub fn pin(&mut self, kind: Kind, epoch: u32, pk: [u8; 32]) -> Result<(), PinError> {

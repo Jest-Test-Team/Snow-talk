@@ -16,12 +16,14 @@ pub mod ticket;
 #[cfg(target_arch = "wasm32")]
 mod matchmaker;
 #[cfg(target_arch = "wasm32")]
+mod nullifiers;
+#[cfg(target_arch = "wasm32")]
 mod room;
 #[cfg(target_arch = "wasm32")]
 mod util;
 
 #[cfg(target_arch = "wasm32")]
-pub use {matchmaker::Matchmaker, room::ChatRoom};
+pub use {matchmaker::Matchmaker, nullifiers::Nullifiers, room::ChatRoom};
 
 /// WebSocket subprotocol both sides must agree on.
 pub const PROTOCOL: &str = "snowtalk.v1";

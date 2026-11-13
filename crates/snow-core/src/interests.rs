@@ -82,6 +82,7 @@ mod tests {
             bucket: None,
             rotation_secs: None,
             paranoid: false,
+            trusted: false,
             chaff_ms: None,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             adult_tags: adult.iter().map(|s| s.to_string()).collect(),

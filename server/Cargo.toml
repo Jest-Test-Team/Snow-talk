@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 getrandom = { version = "0.2", features = ["js"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 console_error_panic_hook = "0.1"

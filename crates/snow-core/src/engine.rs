@@ -125,6 +125,30 @@ pub fn unix_now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
+/// Good-chat tokens needed for the trusted queue (matches the server's `TRUSTED_MIN`).
+pub const TRUSTED_MIN: usize = 3;
+
+/// Tokens to present at the matchmaker (postcard-encoded).
+fn spend_tokens(cfg: &Config, shared: &Shared, l: &dyn ChatListener) -> Vec<Vec<u8>> {
+    use snow_tokens::Kind;
+    let epoch = snow_tokens::epoch(unix_now());
+    let mut w = shared.wallet.lock().unwrap();
+    let mut out = Vec::new();
+    if cfg.trusted {
+        out.extend(w.take(Kind::Good, TRUSTED_MIN, epoch).unwrap_or_default());
+    }
+    if cfg.paranoid {
+        out.extend(w.take(Kind::Vip, 1, epoch).unwrap_or_default());
+    }
+    drop(w);
+    if !out.is_empty() {
+        l.on_wallet_changed();
+    }
+    out.iter()
+        .map(|t| postcard::to_allocvec(t).expect("token serializes"))
+        .collect()
+}
+
 /// A fresh, unlinkable good-chat token request.
 fn new_claim() -> (snow_tokens::Request, Vec<[u8; 32]>) {
     use rand::RngCore;
@@ -272,21 +296,23 @@ async fn run_inner(
         .await
         .map_err(|_| EngineError::Protocol)?;
 
-    // 2. Matchmaking.
+    // 2. Matchmaking. Tokens are taken from the wallet only now, right before
+    // they're sent; once the matchmaker has them they're spent either way.
+    let spend = spend_tokens(cfg, &shared, l);
     l.on_state(ChatState::Queued);
     let mut mm = Ws::connect(&netw, "/match", &format!("b.{bucket}")).await?;
     mm.send(&ClientMsg::Join {
         pow: snow_proto::PowSolution { challenge, nonce },
         bucket: (bucket != interests::RANDOM_BUCKET).then_some(bucket),
         paranoid: cfg.paranoid,
-        trusted: false,
-        spend: Vec::new(),
+        trusted: cfg.trusted,
+        spend,
     })
     .await?;
-    let (ticket, role, paranoid) = loop {
+    let (ticket, role, paranoid, trusted) = loop {
         tokio::select! {
             m = mm.recv() => match m? {
-                ServerMsg::Matched { ticket, role, paranoid, .. } => break (ticket, role, paranoid),
+                ServerMsg::Matched { ticket, role, paranoid, trusted } => break (ticket, role, paranoid, trusted),
                 ServerMsg::Error(c) => return Err(EngineError::Server(c)),
                 _ => return Err(EngineError::Protocol),
             },
@@ -301,7 +327,7 @@ async fn run_inner(
 
     // 3. Room + handshake + chat.
     let paranoid = paranoid && cfg.paranoid;
-    l.on_state(ChatState::Handshaking { paranoid });
+    l.on_state(ChatState::Handshaking { paranoid, trusted });
     let room_url = "/room";
     let (mut room, mut resume, peer_present) = join_room(&netw, room_url, &ticket).await?;
     let mut chat = Chat::new(role, shared.clone(), cfg);
@@ -433,7 +459,7 @@ async fn run_inner(
                     l.on_state(if chat.session.is_some() {
                         ChatState::Chatting
                     } else {
-                        ChatState::Handshaking { paranoid }
+                        ChatState::Handshaking { paranoid, trusted }
                     });
                 }
                 Reconnect::End(r) => return Ok(r.into()),

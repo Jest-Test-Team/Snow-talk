@@ -17,10 +17,15 @@ pub struct Config {
     /// Session-ID rotation period. `None` = random 8–15 minutes.
     #[uniffi(default = None)]
     pub rotation_secs: Option<u32>,
-    /// Ask for paranoid mode (VIP): constant-rate cover traffic. Only takes effect
-    /// if the server grants it — see [`ChatState::Handshaking::paranoid`].
+    /// Ask for paranoid mode (VIP): constant-rate cover traffic. Spends one VIP
+    /// token if the wallet has one. Only takes effect if the server grants it —
+    /// see [`ChatState::Handshaking::paranoid`].
     #[uniffi(default = false)]
     pub paranoid: bool,
+    /// Use the trusted queue: spends `TRUSTED_MIN` (3) good-chat tokens and is
+    /// only matched with others who did the same. Ignored if the wallet has fewer.
+    #[uniffi(default = false)]
+    pub trusted: bool,
     /// Paranoid-mode cover-traffic period in ms. `None` = 1500 ms, `Some(0)` = off.
     /// Overridden by remote config in production. Ignored unless paranoid is granted.
     #[uniffi(default = None)]
@@ -83,6 +88,8 @@ pub enum ChatState {
     /// (requested and granted by the server).
     Handshaking {
         paranoid: bool,
+        /// Both of us came through the trusted queue.
+        trusted: bool,
     },
     Chatting,
     /// Our own connection dropped; retrying with the resume ticket.

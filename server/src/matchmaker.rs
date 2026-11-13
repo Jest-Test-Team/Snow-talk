@@ -4,10 +4,13 @@
 //! a valid proof of work, the two are paired: a fresh ChatRoom ID is minted, each
 //! side gets a short-lived signed ticket plus its handshake role, and both
 //! matchmaker sockets are closed.
-use crate::ticket::{Kind, Ticket, FLAG_PARANOID};
+use crate::nullifiers::SHARDS;
+use crate::ticket::{Kind as TicketKind, Ticket, FLAG_PARANOID};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
 use snow_proto::{ClientMsg, ErrorCode, Role, ServerMsg};
+use snow_tokens::{Issuer, Kind, Token};
+use std::collections::BTreeMap;
 use worker::*;
 
 const TICKET_TTL_MS: u64 = 30_000;
@@ -31,6 +34,9 @@ struct Att {
     /// Paranoid mode granted to this waiter.
     #[serde(default)]
     paranoid: bool,
+    /// In the trusted queue (spent enough good-chat tokens).
+    #[serde(default)]
+    trusted: bool,
 }
 
 #[durable_object]
@@ -53,13 +59,77 @@ impl Matchmaker {
             .collect()
     }
 
-    /// Paranoid mode costs real money (constant traffic keeps the room awake), so
-    /// it is a paid perk. `PARANOID_GRANT=open` grants it to anyone (dev/beta);
-    /// otherwise it needs a redeemed VIP token (Phase 10), so for now: denied.
-    fn grant_paranoid(&self) -> bool {
+    fn var<T: std::str::FromStr>(&self, name: &str, default: T) -> T {
         self.env
-            .var("PARANOID_GRANT")
-            .is_ok_and(|v| v.to_string() == "open")
+            .var(name)
+            .ok()
+            .and_then(|v| v.to_string().parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// Paranoid mode costs real money (constant traffic keeps the room awake), so
+    /// it is a paid perk: one VIP token. `PARANOID_GRANT=open` grants it to
+    /// anyone (dev/beta).
+    async fn grant_paranoid(&self, spend: &[Vec<u8>]) -> Result<bool> {
+        if self.var("PARANOID_GRANT", String::new()) == "open" {
+            return Ok(true);
+        }
+        self.redeem(spend, Kind::Vip, 1).await
+    }
+
+    /// Verify `need` tokens of `kind` among `spend` and burn their nullifiers.
+    /// `false` if there aren't enough genuine, current, unspent ones. Tokens are
+    /// unlinkable, so this learns only "holds N tokens", never whose.
+    async fn redeem(&self, spend: &[Vec<u8>], kind: Kind, need: usize) -> Result<bool> {
+        let now_epoch = snow_tokens::epoch(now_secs());
+        let mut toks: Vec<Token> = spend
+            .iter()
+            .filter_map(|b| postcard::from_bytes::<Token>(b).ok())
+            .filter(|t| t.kind == kind)
+            .collect();
+        toks.dedup_by_key(|t| t.nullifier());
+        if need == 0 || toks.len() < need {
+            return Ok(false);
+        }
+        toks.truncate(need);
+        let master = secret(&self.env, "TOKEN_MASTER")?;
+        let mut groups: BTreeMap<(u32, u8), Vec<[u8; 32]>> = BTreeMap::new();
+        for t in &toks {
+            let ok = snow_tokens::is_current(t.epoch, now_epoch)
+                && Issuer::new(&master, kind, t.epoch).is_ok_and(|i| i.verify(t));
+            if !ok {
+                return Ok(false);
+            }
+            let nf = t.nullifier();
+            let g = groups.entry((t.epoch, nf[0] % SHARDS)).or_default();
+            if g.contains(&nf) {
+                return Ok(false);
+            }
+            g.push(nf);
+        }
+        // Rare partial failure (a double-spend attempt) leaves earlier groups
+        // spent; that only hurts the cheater.
+        let ns = self.env.durable_object("NULLIFIERS")?;
+        for ((epoch, shard), nfs) in groups {
+            let stub = ns
+                .id_from_name(&format!("nf:{epoch}:{shard}"))?
+                .get_stub()?;
+            let headers = Headers::new();
+            headers.set("x-snow-epoch", &epoch.to_string())?;
+            let body = postcard::to_allocvec(&nfs).map_err(|e| Error::RustError(e.to_string()))?;
+            let req = Request::new_with_init(
+                "https://nullifiers/",
+                RequestInit::new()
+                    .with_method(Method::Post)
+                    .with_headers(headers)
+                    .with_body(Some(js_sys::Uint8Array::from(&body[..]).into())),
+            )?;
+            if stub.fetch_with_request(req).await?.status_code() != 200 {
+                return Ok(false);
+            }
+        }
+        event("tokens_redeemed");
+        Ok(true)
     }
 
     fn reject(ws: &WebSocket, code: ErrorCode) -> Result<()> {
@@ -115,6 +185,7 @@ impl DurableObject for Matchmaker {
             status: Status::AwaitingJoin,
             since_ms: now_ms(),
             paranoid: false,
+            trusted: false,
         })?;
         self.ensure_sweep_alarm().await?;
         upgrade_response(pair.client)
@@ -128,8 +199,8 @@ impl DurableObject for Matchmaker {
             pow,
             bucket,
             paranoid,
-            trusted: _,
-            spend: _,
+            trusted,
+            spend,
         }) = decode(msg)
         else {
             return Self::reject(&ws, ErrorCode::BadFrame);
@@ -142,14 +213,36 @@ impl DurableObject for Matchmaker {
         if !self.check_pow(&att, &pow).await? {
             return Self::reject(&ws, ErrorCode::BadPow);
         }
-        att.paranoid = paranoid && self.grant_paranoid();
+        att.paranoid = paranoid && self.grant_paranoid(&spend).await?;
+        att.trusted = trusted
+            && self
+                .redeem(&spend, Kind::Good, self.var("TRUSTED_MIN", 3usize))
+                .await?;
 
-        // Pair with whoever has been waiting longest.
-        let partner = self
+        // Pair with whoever has been waiting longest, trusted with trusted. A
+        // trusted waiter is reserved for trusted arrivals for a while, then may
+        // be matched with anyone so nobody waits forever.
+        let now = now_ms();
+        let exclusive_ms = self.var("TRUSTED_EXCLUSIVE_SECS", 30u64) * 1000;
+        let waiting: Vec<(WebSocket, Att)> = self
             .sockets()
             .into_iter()
             .filter(|(_, a)| a.status == Status::Waiting && a.id != att.id)
-            .min_by_key(|(_, a)| a.since_ms);
+            .collect();
+        let oldest = |pred: &dyn Fn(&Att) -> bool| {
+            waiting
+                .iter()
+                .filter(|(_, a)| pred(a))
+                .min_by_key(|(_, a)| a.since_ms)
+                .cloned()
+        };
+        let partner = if att.trusted {
+            oldest(&|a| a.trusted)
+        } else {
+            oldest(&|a| !a.trusted).or_else(|| {
+                oldest(&|a| a.trusted && now.saturating_sub(a.since_ms) >= exclusive_ms)
+            })
+        };
 
         let Some((pws, mut patt)) = partner else {
             att.status = Status::Waiting;
@@ -170,7 +263,7 @@ impl DurableObject for Matchmaker {
             Ticket {
                 room,
                 slot,
-                kind: Kind::Join,
+                kind: TicketKind::Join,
                 flags: if paranoid { FLAG_PARANOID } else { 0 },
                 gen: 0,
                 exp,
@@ -178,6 +271,7 @@ impl DurableObject for Matchmaker {
             .sign(&key)
         };
 
+        let both_trusted = att.trusted && patt.trusted;
         // The partner waited longer, so it gets slot 0 / Initiator.
         for (sock, a, slot, role) in [
             (&pws, &mut patt, 0, Role::Initiator),
@@ -191,7 +285,7 @@ impl DurableObject for Matchmaker {
                     ticket: ticket(slot, a.paranoid),
                     role,
                     paranoid: a.paranoid,
-                    trusted: false,
+                    trusted: both_trusted,
                 },
             )?;
             sock.close(Some(1000), Some("matched"))?;
