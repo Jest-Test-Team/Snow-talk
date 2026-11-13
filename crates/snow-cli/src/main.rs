@@ -4,7 +4,8 @@
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
-//!                    [--scenario basic|reconnect|rotate|grace]
+//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|grace]
+//!                    [--paranoid] [--chaff MS]
 //! ```
 //! `pair-test` runs two clients in one process, pairs them, exchanges messages in
 //! both directions, checks that the SAS matches, and exits non-zero on failure.
@@ -12,8 +13,10 @@
 //! * `basic`     — chat, then A leaves and B must see `PeerLeft`
 //! * `reconnect` — A's socket is killed; both must recover and keep chatting
 //! * `rotate`    — session IDs rotate every 2 s while chatting; nothing may be lost
-//! * `chaff`     — idle clients must emit cover frames at the configured rate,
-//!   and stop in the background
+//! * `chaff`     — paranoid mode (needs `PARANOID_GRANT=open` on the relay): idle
+//!   clients must emit cover frames at the configured rate, and stop in the background
+//! * `free`      — no paranoid mode: no cover frames at all, bursts still delivered
+//! * `flood`     — a client bypassing its pacer must be rate-limited by the room
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
@@ -56,6 +59,7 @@ struct Args {
     scenario: String,
     rotation_secs: Option<u32>,
     chaff_ms: Option<u32>,
+    paranoid: bool,
     pins: Vec<String>,
     tor_dir: Option<String>,
 }
@@ -70,6 +74,7 @@ fn args() -> Args {
         scenario: "basic".into(),
         rotation_secs: None,
         chaff_ms: None,
+        paranoid: false,
         pins: Vec::new(),
         tor_dir: None,
     };
@@ -94,6 +99,7 @@ fn args() -> Args {
             "--scenario" => a.scenario = it.next().expect("--scenario NAME"),
             "--tor" => a.tor_dir = Some(it.next().expect("--tor DIR")),
             "--pin" => a.pins.push(it.next().expect("--pin BASE64")),
+            "--paranoid" => a.paranoid = true,
             "--chaff" => {
                 a.chaff_ms = Some(it.next().and_then(|v| v.parse().ok()).expect("--chaff MS"))
             }
@@ -116,6 +122,7 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
             bucket: a.bucket,
             rotation_secs: a.rotation_secs,
             chaff_ms: a.chaff_ms,
+            paranoid: a.paranoid,
             pins: a.pins.clone(),
             tor_dir: a.tor_dir.clone(),
         },
@@ -207,8 +214,11 @@ fn pair_test(a: &Args) -> Result<(), String> {
     if a.scenario == "rotate" {
         a2.rotation_secs = Some(2);
     }
-    // Tests run with fast cover traffic unless told otherwise.
-    a2.chaff_ms = a.chaff_ms.or(Some(100));
+    if a.scenario == "chaff" {
+        // Fast cover traffic (the fastest the pacer allows) so the test is quick.
+        a2.paranoid = true;
+        a2.chaff_ms = a.chaff_ms.or(Some(250));
+    }
     let (ca, ra) = client(&a2);
     let (cb, rb) = client(&a2);
     let t0 = Instant::now();
@@ -221,6 +231,16 @@ fn pair_test(a: &Args) -> Result<(), String> {
             None
         }
     };
+    let granted = wait(&ra, "A handshaking", |ev| match ev {
+        Ev::State(ChatState::Handshaking { paranoid }) => Some(*paranoid),
+        _ => None,
+    })?;
+    if granted != a2.paranoid {
+        return Err(format!(
+            "paranoid requested={} but granted={granted}",
+            a2.paranoid
+        ));
+    }
     let sa = wait(&ra, "SAS on A", sas)?;
     wait(&ra, "A chatting", chatting)?;
     let sb = wait(&rb, "SAS on B", sas)?;
@@ -273,7 +293,7 @@ fn pair_test(a: &Args) -> Result<(), String> {
             println!("{n} round trips across rotations, none lost");
         }
         "chaff" => {
-            let ms = a2.chaff_ms.unwrap_or(100) as u64;
+            let ms = a2.chaff_ms.unwrap_or(250) as u64;
             let idle = Duration::from_secs(2);
             let before = ca.debug_frames_sent();
             std::thread::sleep(idle);
@@ -294,6 +314,49 @@ fn pair_test(a: &Args) -> Result<(), String> {
             }
             ca.set_foreground(true);
             pair.exchange(1, "after-bg")?;
+        }
+        "free" => {
+            let before = ca.debug_frames_sent();
+            std::thread::sleep(Duration::from_secs(2));
+            let idle = ca.debug_frames_sent() - before;
+            println!("idle 2s without paranoid: {idle} frames");
+            if idle != 0 {
+                return Err("free mode must not send cover traffic".into());
+            }
+            // A burst of sends is spaced by the pacer and must not trip the cap.
+            let n = 12;
+            for i in 0..n {
+                ca.send_text(format!("{} burst #{i}", a.marker), 0)
+                    .map_err(|e| e.to_string())?;
+            }
+            for i in 0..n {
+                let want = format!("{} burst #{i}", a.marker);
+                let got = wait(&rb, "burst", |ev| match ev {
+                    Ev::Msg(m) => Some(m.body.clone()),
+                    _ => None,
+                })?;
+                if got != want {
+                    return Err(format!("burst: expected {want:?}, got {got:?}"));
+                }
+            }
+            if ca.debug_rate_limited() != 0 {
+                return Err("pacer exceeded the room's free rate cap".into());
+            }
+            println!("burst of {n} delivered in order, never rate-limited");
+        }
+        "flood" => {
+            ca.debug_flood(100);
+            std::thread::sleep(Duration::from_secs(1));
+            let dropped = ca.debug_rate_limited();
+            println!("flood of 100: {dropped} dropped by the room");
+            if dropped < 50 {
+                return Err(format!(
+                    "room should cap free slots, dropped only {dropped}"
+                ));
+            }
+            std::thread::sleep(Duration::from_secs(3));
+            pair.exchange(1, "after-flood")?;
+            println!("chat still works after the flood");
         }
         "grace" => {
             ca.panic_wipe();

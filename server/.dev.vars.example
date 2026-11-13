@@ -2,3 +2,4 @@
 POW_KEY="dev-pow-key-change-me"
 TICKET_KEY="dev-ticket-key-change-me"
 POW_DIFFICULTY="12"
+PARANOID_GRANT="open"

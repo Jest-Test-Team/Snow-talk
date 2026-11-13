@@ -35,6 +35,9 @@ pub enum ClientMsg {
         pow: PowSolution,
         /// Coarse interest bucket (k-anonymous), `None` = random matching.
         bucket: Option<u8>,
+        /// Ask for paranoid mode (constant-rate cover traffic, a VIP perk).
+        /// The matchmaker decides; see [`ServerMsg::Matched::paranoid`].
+        paranoid: bool,
     },
     /// Opaque peer bytes. The relay forwards these unchanged and never parses them.
     Relay(Vec<u8>),
@@ -49,6 +52,9 @@ pub enum ServerMsg {
     Matched {
         ticket: String,
         role: Role,
+        /// Paranoid mode granted: the room allows a constant cover-traffic rate
+        /// for this slot. If `false`, the client must not send chaff.
+        paranoid: bool,
     },
     /// Joined the room. `resume` reconnects to the same slot within the grace period.
     Joined {

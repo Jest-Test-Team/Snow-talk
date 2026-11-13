@@ -105,6 +105,7 @@ mod entry {
                 headers.set("x-snow-slot", &t.slot.to_string())?;
                 headers.set("x-snow-kind", &(t.kind as u8).to_string())?;
                 headers.set("x-snow-gen", &t.gen.to_string())?;
+                headers.set("x-snow-flags", &t.flags.to_string())?;
                 let fwd = Request::new_with_init(
                     "https://room/",
                     RequestInit::new().with_headers(headers),

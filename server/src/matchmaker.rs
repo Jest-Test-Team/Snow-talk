@@ -4,7 +4,7 @@
 //! a valid proof of work, the two are paired: a fresh ChatRoom ID is minted, each
 //! side gets a short-lived signed ticket plus its handshake role, and both
 //! matchmaker sockets are closed.
-use crate::ticket::{Kind, Ticket};
+use crate::ticket::{Kind, Ticket, FLAG_PARANOID};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
 use snow_proto::{ClientMsg, ErrorCode, Role, ServerMsg};
@@ -28,6 +28,9 @@ struct Att {
     bucket: u8,
     status: Status,
     since_ms: u64,
+    /// Paranoid mode granted to this waiter.
+    #[serde(default)]
+    paranoid: bool,
 }
 
 #[durable_object]
@@ -48,6 +51,15 @@ impl Matchmaker {
                     .map(|a| (ws, a))
             })
             .collect()
+    }
+
+    /// Paranoid mode costs real money (constant traffic keeps the room awake), so
+    /// it is a paid perk. `PARANOID_GRANT=open` grants it to anyone (dev/beta);
+    /// otherwise it needs a redeemed VIP token (Phase 10), so for now: denied.
+    fn grant_paranoid(&self) -> bool {
+        self.env
+            .var("PARANOID_GRANT")
+            .is_ok_and(|v| v.to_string() == "open")
     }
 
     fn reject(ws: &WebSocket, code: ErrorCode) -> Result<()> {
@@ -102,6 +114,7 @@ impl DurableObject for Matchmaker {
             bucket,
             status: Status::AwaitingJoin,
             since_ms: now_ms(),
+            paranoid: false,
         })?;
         self.ensure_sweep_alarm().await?;
         upgrade_response(pair.client)
@@ -111,7 +124,12 @@ impl DurableObject for Matchmaker {
         let Some(mut att) = ws.deserialize_attachment::<Att>()? else {
             return Self::reject(&ws, ErrorCode::Internal);
         };
-        let Some(ClientMsg::Join { pow, bucket }) = decode(msg) else {
+        let Some(ClientMsg::Join {
+            pow,
+            bucket,
+            paranoid,
+        }) = decode(msg)
+        else {
             return Self::reject(&ws, ErrorCode::BadFrame);
         };
         if att.status != Status::AwaitingJoin
@@ -122,6 +140,7 @@ impl DurableObject for Matchmaker {
         if !self.check_pow(&att, &pow).await? {
             return Self::reject(&ws, ErrorCode::BadPow);
         }
+        att.paranoid = paranoid && self.grant_paranoid();
 
         // Pair with whoever has been waiting longest.
         let partner = self
@@ -145,11 +164,12 @@ impl DurableObject for Matchmaker {
         hex::decode_to_slice(&room_id, &mut room).map_err(|e| Error::RustError(e.to_string()))?;
         let key = secret(&self.env, "TICKET_KEY")?;
         let exp = now_ms() + TICKET_TTL_MS;
-        let ticket = |slot| {
+        let ticket = |slot, paranoid: bool| {
             Ticket {
                 room,
                 slot,
                 kind: Kind::Join,
+                flags: if paranoid { FLAG_PARANOID } else { 0 },
                 gen: 0,
                 exp,
             }
@@ -166,8 +186,9 @@ impl DurableObject for Matchmaker {
             send(
                 sock,
                 &ServerMsg::Matched {
-                    ticket: ticket(slot),
+                    ticket: ticket(slot, a.paranoid),
                     role,
+                    paranoid: a.paranoid,
                 },
             )?;
             sock.close(Some(1000), Some("matched"))?;

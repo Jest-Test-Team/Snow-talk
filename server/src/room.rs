@@ -3,7 +3,7 @@
 //! Relayed bytes are never inspected, logged or stored. The only storage is
 //! per-slot lifecycle metadata (generation + status), which is needed because the
 //! object hibernates between messages.
-use crate::ticket::{Kind, Ticket};
+use crate::ticket::{Kind, Ticket, FLAG_PARANOID};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
 use snow_proto::{ClientMsg, ErrorCode, ServerMsg};
@@ -16,6 +16,54 @@ const DEFAULT_GRACE_SECS: u32 = 180;
 /// Frames held in memory for a disconnected peer. Best-effort only: this buffer
 /// is never written to storage and is lost if the object hibernates or restarts.
 const HOLD_FRAMES: usize = 32;
+
+/// Per-slot relay rate caps (token bucket: burst, frames/s). Normal chat stays
+/// far below the free cap, which mainly stops a modified client from running
+/// cover traffic (and keeping the room awake) without paying for it.
+const FREE_RATE: Rate = Rate {
+    burst: 20.0,
+    per_sec: 2.0,
+};
+const PARANOID_RATE: Rate = Rate {
+    burst: 40.0,
+    per_sec: 5.0,
+};
+
+#[derive(Clone, Copy)]
+struct Rate {
+    burst: f64,
+    per_sec: f64,
+}
+
+/// Token bucket. RAM only: after hibernation it starts full, which is fine
+/// since the slot was idle.
+#[derive(Clone, Copy, Default)]
+struct Limiter {
+    tokens: f64,
+    at_ms: u64,
+    init: bool,
+}
+
+impl Limiter {
+    fn allow(&mut self, r: Rate, now: u64) -> bool {
+        if !self.init {
+            *self = Limiter {
+                tokens: r.burst,
+                at_ms: now,
+                init: true,
+            };
+        }
+        let dt = now.saturating_sub(self.at_ms) as f64 / 1000.0;
+        self.tokens = (self.tokens + dt * r.per_sec).min(r.burst);
+        self.at_ms = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Resume tickets outlive the grace period; the room enforces the real deadline.
 const RESUME_TICKET_TTL_MS: u64 = 24 * 3600 * 1000;
@@ -37,6 +85,9 @@ pub struct Slot {
     pub status: SlotStatus,
     /// Only meaningful while `Disconnected`: ms timestamp when the hold expires.
     pub deadline_ms: u64,
+    /// Perks from the join ticket (`FLAG_*`); carried into resume tickets.
+    #[serde(default)]
+    pub flags: u8,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy)]
@@ -51,6 +102,8 @@ pub struct ChatRoom {
     env: Env,
     /// Ciphertext frames waiting for a disconnected slot (in RAM only).
     held: RefCell<[VecDeque<Vec<u8>>; 2]>,
+    /// Relay rate limiter per sending slot (in RAM only).
+    limit: RefCell<[Limiter; 2]>,
 }
 
 fn tag(slot: u8) -> &'static str {
@@ -201,6 +254,7 @@ impl DurableObject for ChatRoom {
             state,
             env,
             held: RefCell::new([VecDeque::new(), VecDeque::new()]),
+            limit: RefCell::new([Limiter::default(); 2]),
         }
     }
 
@@ -209,6 +263,7 @@ impl DurableObject for ChatRoom {
         let slot: u8 = Self::header(&req, "x-snow-slot")?;
         let kind: u8 = Self::header(&req, "x-snow-kind")?;
         let gen: u32 = Self::header(&req, "x-snow-gen")?;
+        let flags: u8 = Self::header(&req, "x-snow-flags")?;
         if slot > 1 || self.closed().await? {
             return Response::error("gone", 410);
         }
@@ -230,6 +285,10 @@ impl DurableObject for ChatRoom {
         s.gen += 1;
         s.status = SlotStatus::Connected;
         s.deadline_ms = 0;
+        if first_entry {
+            // Perks come from the matchmaker's join ticket; resumes keep them.
+            s.flags = flags;
+        }
         self.put_slot(slot, s).await?;
         for old in self.state.get_websockets_with_tag(tag(slot)) {
             let _ = old.close(Some(1000), Some("superseded"));
@@ -247,6 +306,7 @@ impl DurableObject for ChatRoom {
             room,
             slot,
             kind: Kind::Resume,
+            flags: s.flags,
             gen: s.gen,
             exp: now_ms() + RESUME_TICKET_TTL_MS,
         }
@@ -288,7 +348,19 @@ impl DurableObject for ChatRoom {
         }
         match decode(msg) {
             // Forwarded unchanged (or briefly held in RAM if the peer is reconnecting).
-            Some(ClientMsg::Relay(bytes)) => self.relay(1 - att.slot, bytes).await,
+            Some(ClientMsg::Relay(bytes)) => {
+                let s = self.slot(att.slot).await?;
+                let rate = if s.flags & FLAG_PARANOID != 0 {
+                    PARANOID_RATE
+                } else {
+                    FREE_RATE
+                };
+                if !self.limit.borrow_mut()[att.slot as usize].allow(rate, now_ms()) {
+                    // Dropped, not relayed. The sender's pacer should never get here.
+                    return send(&ws, &ServerMsg::Error(ErrorCode::RateLimited));
+                }
+                self.relay(1 - att.slot, bytes).await
+            }
             Some(ClientMsg::Leave) => {
                 let mut s = self.slot(att.slot).await?;
                 s.status = SlotStatus::Left;

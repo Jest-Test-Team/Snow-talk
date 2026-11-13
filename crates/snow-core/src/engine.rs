@@ -3,7 +3,7 @@ use crate::api::*;
 use crate::net::{self, NetError, Ws};
 use crate::pacer::{Out, Pacer};
 use snow_crypto::{ChatSession, CryptoError, Handshaker, Step};
-use snow_proto::{ClientMsg, Handshake, Inner, PeerEnvelope, Role, ServerMsg};
+use snow_proto::{ClientMsg, ErrorCode, Handshake, Inner, PeerEnvelope, Role, ServerMsg};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -21,6 +21,17 @@ pub enum Cmd {
     DebugDrop,
     /// App moved to the foreground (`true`) or background (`false`).
     Foreground(bool),
+    /// Testing: send `n` cover frames back-to-back, bypassing the pacer.
+    DebugFlood(u32),
+}
+
+/// Test/diagnostic counters.
+#[derive(Default)]
+pub struct Counters {
+    /// Encrypted frames sent (text + chaff).
+    pub sent: AtomicU64,
+    /// Frames the room dropped for exceeding its rate cap.
+    pub rate_limited: AtomicU64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,7 +52,7 @@ enum EngineError {
 /// State shared by all chats of one `SnowClient`.
 #[derive(Default, Clone)]
 pub struct Shared {
-    pub frames: Arc<AtomicU64>,
+    pub frames: Arc<Counters>,
     /// Bootstrapped once, on the first chat in Tor mode.
     #[cfg(feature = "tor")]
     pub tor: Arc<tokio::sync::OnceCell<crate::tor::TorHandle>>,
@@ -115,17 +126,18 @@ async fn run_inner(
     mm.send(&ClientMsg::Join {
         pow: snow_proto::PowSolution { challenge, nonce },
         bucket: cfg.bucket,
+        paranoid: cfg.paranoid,
     })
     .await?;
-    let (ticket, role) = loop {
+    let (ticket, role, paranoid) = loop {
         tokio::select! {
             m = mm.recv() => match m? {
-                ServerMsg::Matched { ticket, role } => break (ticket, role),
+                ServerMsg::Matched { ticket, role, paranoid } => break (ticket, role, paranoid),
                 ServerMsg::Error(c) => return Err(EngineError::Server(c)),
                 _ => return Err(EngineError::Protocol),
             },
             c = cmds.recv() => match c {
-                Some(Cmd::Send { .. } | Cmd::DebugDrop | Cmd::Foreground(_)) => continue,
+                Some(Cmd::Send { .. } | Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Foreground(_)) => continue,
                 Some(Cmd::Wipe) => { mm.close().await; return Ok(EndReason::Wiped) }
                 Some(Cmd::Leave) | None => { mm.close().await; return Ok(EndReason::Cancelled) }
             },
@@ -134,7 +146,8 @@ async fn run_inner(
     mm.close().await;
 
     // 3. Room + handshake + chat.
-    l.on_state(ChatState::Handshaking);
+    let paranoid = paranoid && cfg.paranoid;
+    l.on_state(ChatState::Handshaking { paranoid });
     let room_url = "/room";
     let (mut room, mut resume, peer_present) = join_room(&netw, room_url, &ticket).await?;
     let mut chat = Chat::new(role, shared.frames.clone());
@@ -143,7 +156,9 @@ async fn run_inner(
     }
     let mut rotate_at = next_rotation(cfg);
     let mut outbox: Vec<Cmd> = Vec::new();
-    let mut pacer = Pacer::new(cfg.chaff_ms);
+    // Without a paranoid grant there is no cover traffic: the room would rate-limit
+    // it, and idle rooms must be able to hibernate.
+    let mut pacer = Pacer::new(if paranoid { cfg.chaff_ms } else { Some(0) });
     let mut foreground = true;
 
     loop {
@@ -189,6 +204,13 @@ async fn run_inner(
                     return Ok(EndReason::SelfLeft);
                 }
                 Some(Cmd::DebugDrop) => { room.abort().await; true }
+                Some(Cmd::DebugFlood(n)) => {
+                    let mut lost = false;
+                    for _ in 0..n {
+                        lost |= chat.send_chaff(&mut room).await.is_err();
+                    }
+                    lost
+                }
                 Some(Cmd::Wipe) | None => { room.close().await; return Ok(EndReason::Wiped) }
             },
         };
@@ -199,7 +221,7 @@ async fn run_inner(
                     l.on_state(if chat.session.is_some() {
                         ChatState::Chatting
                     } else {
-                        ChatState::Handshaking
+                        ChatState::Handshaking { paranoid }
                     });
                 }
                 Reconnect::End(r) => return Ok(r),
@@ -276,7 +298,7 @@ async fn reconnect(
             _ = tokio::time::sleep(backoff.min(left)) => {}
             c = cmds.recv() => match c {
                 Some(c @ (Cmd::Send { .. } | Cmd::Foreground(_))) => outbox.push(c),
-                Some(Cmd::DebugDrop) => {}
+                Some(Cmd::DebugDrop | Cmd::DebugFlood(_)) => {}
                 Some(Cmd::Leave) => return Ok(Reconnect::End(EndReason::SelfLeft)),
                 Some(Cmd::Wipe) | None => return Ok(Reconnect::End(EndReason::Wiped)),
             },
@@ -290,14 +312,14 @@ struct Chat {
     role: Role,
     /// False while the room reports the peer as disconnected (no point sending cover traffic).
     peer_online: bool,
-    frames: Arc<AtomicU64>,
+    frames: Arc<Counters>,
     commit: Option<Handshake>,
     hs: Option<Handshaker>,
     session: Option<ChatSession>,
 }
 
 impl Chat {
-    fn new(role: Role, frames: Arc<AtomicU64>) -> Self {
+    fn new(role: Role, frames: Arc<Counters>) -> Self {
         let (hs, commit) = Handshaker::new(role);
         Self {
             role,
@@ -342,7 +364,7 @@ impl Chat {
         };
         let env = s.encrypt(inner)?;
         room.send(&relay(&env)).await?;
-        self.frames.fetch_add(1, Ordering::Relaxed);
+        self.frames.sent.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -369,6 +391,11 @@ impl Chat {
             ServerMsg::PeerReconnected => {
                 self.peer_online = true;
                 l.on_peer(PeerEvent::Reconnected)
+            }
+            // The room dropped a frame over its rate cap. Olm tolerates the gap;
+            // our pacer stays under the cap, so this means a misconfiguration.
+            ServerMsg::Error(ErrorCode::RateLimited) => {
+                self.frames.rate_limited.fetch_add(1, Ordering::Relaxed);
             }
             ServerMsg::Error(c) => return Err(EngineError::Server(c)),
             ServerMsg::Rotate { .. } | ServerMsg::Joined { .. } | ServerMsg::Matched { .. } => {}

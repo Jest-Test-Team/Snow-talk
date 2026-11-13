@@ -7,6 +7,9 @@ command = "worker-build --release"
 
 [vars]
 POW_DIFFICULTY = "23"
+# Paranoid mode (constant cover traffic) keeps rooms from hibernating, so it is a
+# VIP perk. "open" = grant to anyone (dev/beta); anything else = token required.
+PARANOID_GRANT = "token"
 
 [[durable_objects.bindings]]
 name = "MATCHMAKER"

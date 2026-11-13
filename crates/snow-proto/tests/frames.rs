@@ -16,6 +16,7 @@ fn every_frame_is_fixed_length_and_roundtrips() {
                 nonce: 42,
             },
             bucket: Some(3),
+            paranoid: true,
         },
     ];
     for m in msgs {

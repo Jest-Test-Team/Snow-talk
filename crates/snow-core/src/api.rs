@@ -14,8 +14,12 @@ pub struct Config {
     /// Session-ID rotation period. `None` = random 8–15 minutes.
     #[uniffi(default = None)]
     pub rotation_secs: Option<u32>,
-    /// Cover-traffic period in ms. `None` = 1500 ms, `Some(0)` = off.
-    /// Overridden by remote config in production.
+    /// Ask for paranoid mode (VIP): constant-rate cover traffic. Only takes effect
+    /// if the server grants it — see [`ChatState::Handshaking::paranoid`].
+    #[uniffi(default = false)]
+    pub paranoid: bool,
+    /// Paranoid-mode cover-traffic period in ms. `None` = 1500 ms, `Some(0)` = off.
+    /// Overridden by remote config in production. Ignored unless paranoid is granted.
     #[uniffi(default = None)]
     pub chaff_ms: Option<u32>,
     /// Base64 SHA-256 SPKI pins for the relay's TLS chain. Empty = no pinning (dev only).
@@ -52,7 +56,11 @@ pub enum ChatState {
     ConnectingTor,
     SolvingPow,
     Queued,
-    Handshaking,
+    /// Matched; setting up encryption. `paranoid` = cover traffic is active
+    /// (requested and granted by the server).
+    Handshaking {
+        paranoid: bool,
+    },
     Chatting,
     /// Our own connection dropped; retrying with the resume ticket.
     Reconnecting {
@@ -178,7 +186,17 @@ impl SnowClient {
 
     /// Testing only: number of encrypted frames (text + chaff) this client has sent.
     pub fn debug_frames_sent(&self) -> u64 {
-        self.shared.frames.load(Ordering::Relaxed)
+        self.shared.frames.sent.load(Ordering::Relaxed)
+    }
+
+    /// Testing only: send `n` cover frames at once, ignoring the pacer.
+    pub fn debug_flood(&self, n: u32) {
+        let _ = self.command(Cmd::DebugFlood(n));
+    }
+
+    /// Testing only: frames the room dropped for exceeding its rate cap.
+    pub fn debug_rate_limited(&self) -> u64 {
+        self.shared.frames.rate_limited.load(Ordering::Relaxed)
     }
 
     fn command(&self, c: Cmd) -> Result<(), CoreError> {

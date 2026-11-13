@@ -1,10 +1,13 @@
 //! HMAC-signed room tickets. Pure logic, no Workers APIs, so it's unit-testable natively.
 //!
-//! `hex( room_id[32] | slot u8 | kind u8 | gen u32 | exp u64 | mac[16] )`
+//! `hex( room_id[32] | slot u8 | kind u8 | flags u8 | gen u32 | exp u64 | mac[16] )`
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-const BODY_LEN: usize = 32 + 1 + 1 + 4 + 8;
+const BODY_LEN: usize = 32 + 1 + 1 + 1 + 4 + 8;
+
+/// `flags` bit: paranoid mode (VIP constant-rate cover traffic) was granted.
+pub const FLAG_PARANOID: u8 = 1;
 const MAC_LEN: usize = 16;
 const DOMAIN: &[u8] = b"snowtalk-ticket-v1";
 
@@ -21,6 +24,8 @@ pub struct Ticket {
     pub room: [u8; 32],
     pub slot: u8,
     pub kind: Kind,
+    /// Perks granted at match time (`FLAG_*`). Signed, so a client can't add them.
+    pub flags: u8,
     /// Generation. The room only accepts the latest one, so each ticket works once.
     pub gen: u32,
     /// Expiry, ms since the epoch.
@@ -45,6 +50,7 @@ impl Ticket {
         b.extend_from_slice(&self.room);
         b.push(self.slot);
         b.push(self.kind as u8);
+        b.push(self.flags);
         b.extend_from_slice(&self.gen.to_be_bytes());
         b.extend_from_slice(&self.exp.to_be_bytes());
         let m = mac(key, &b);
@@ -77,8 +83,9 @@ impl Ticket {
             room: body[..32].try_into().ok()?,
             slot: body[32],
             kind,
-            gen: u32::from_be_bytes(body[34..38].try_into().ok()?),
-            exp: u64::from_be_bytes(body[38..46].try_into().ok()?),
+            flags: body[34],
+            gen: u32::from_be_bytes(body[35..39].try_into().ok()?),
+            exp: u64::from_be_bytes(body[39..47].try_into().ok()?),
         };
         (t.slot <= 1 && now_ms <= t.exp).then_some(t)
     }
@@ -93,6 +100,7 @@ mod tests {
             room: [7; 32],
             slot: 1,
             kind: Kind::Join,
+            flags: FLAG_PARANOID,
             gen: 0,
             exp: 1000,
         }
@@ -111,7 +119,10 @@ mod tests {
         assert_eq!(Ticket::verify(b"k", &s, 1001), None);
         let mut b = hex::decode(&s).unwrap();
         b[32] = 0; // try to take the other slot
-        assert_eq!(Ticket::verify(b"k", &hex::encode(b), 0), None);
+        assert_eq!(Ticket::verify(b"k", &hex::encode(&b), 0), None);
+        let mut b = hex::decode(&s).unwrap();
+        b[34] = 0; // try to change the granted perks
+        assert_eq!(Ticket::verify(b"k", &hex::encode(&b), 0), None);
         assert_eq!(Ticket::verify(b"k", "zz", 0), None);
     }
 }
