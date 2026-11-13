@@ -143,3 +143,22 @@ Options: (a) accept it as the cost of strong cover traffic; (b) chaff period > 1
 **Deviations**
 - No `opus` crate: it needs C libopus. Voice is platform-encoded and treated as opaque sealed bytes. Recorded audio has no EXIF-like location metadata, but the native layer must not write container tags.
 - The free-mode pacer changed from a fixed 500 ms gap to a token bucket (burst 40, 3.5/s), kept just under the room's raised caps.
+
+## Phase 9 — Trust & safety (core done 2026-11-13; ML stage pending a model decision)
+
+**Plan vs. done**
+- ✅ **PoW**: done in Phases 1–2 (difficulty is a server var and can be raised under load).
+- ✅ **Local rule screening** (`snow-safety`, received text only, on device): links / shorteners, LINE / Telegram / phone / e-mail, crypto and wallet addresses, investment pitches, payments, **game-card / gift-card requests**, gambling, paid-sex solicitation. Text is normalized against obfuscation (full-width, zero-width, Chinese numerals `零九一二…`, spaced-out `l i n e`, `點` → `.`). Contact + money is always blurred. `ChatMessage.safety` (Clean / Caution / Blur) plus `safety_flags` drive "此訊息可能含有不當內容，點擊以檢視". Unit tests include a set of ordinary-chat false-positive checks; E2E `safety` passes.
+- ✅ **Reports**: `report()` during the chat, or within `report_secs` after the peer leaves. The room only records "slot X reported" — no content. Only the first report in a room counts, so a reported user can't retaliate.
+- ✅ **Anonymous reputation tokens** (`snow-tokens`): **RFC 9497 VOPRF (ristretto255)**, issued per room at the end of a chat when both sides were present ≥ `GOOD_AFTER_SECS` (300 s) and active ≥ `MIN_ACTIVE_FRAMES` (10), and the claimant wasn't reported. Keys are derived per (kind, 30-day epoch) from `TOKEN_MASTER`; the client checks the DLEQ proof and pins the key per epoch. The wallet is the app's only persisted state (`wallet_export` → Keychain/Keystore, `on_wallet_changed`).
+- ✅ **Trusted queue**: Join spends 3 good-chat tokens. They're verified, and their nullifiers are burned in a sharded `Nullifiers` DO shared by all matchmaker shards. Trusted users are paired with each other; after `TRUSTED_EXCLUSIVE_SECS` (30 s) a trusted waiter may be matched with anyone. A **VIP token** spent on Join grants paranoid mode (same machinery; VIP issuance arrives with IAP in Phase 10).
+- ✅ E2E: `goodchat` (A=1, B=1), `report` (reported leaver A=0, reporter B=1), `trusted` (3+3 tokens → trusted match; a replayed wallet is refused and matched normally).
+- ⏳ **ML toxicity stage (tract + model from R2 + pinned SHA-256)**: not built yet. It needs a concrete model choice: a multilingual model small enough to download (the plan's 20–60 MB int8), a tokenizer we can run in pure Rust, and a zh-Hant evaluation set for precision/recall. `Verdict.score` is already the hook for combining rules + model.
+- ⏳ **Report with a user-chosen excerpt**: deferred. It would send plaintext to the operator, so it needs a moderation-storage design and its own disclosure.
+
+**Deviations**
+- **Blind RSA (RFC 9474) → VOPRF (RFC 9497).** The issuer is also the only verifier, so public verifiability buys nothing. VOPRF is smaller, constant-time and wasm-friendly, and its DLEQ proof gives the key-consistency guarantee we need (no per-user tagging keys). It also keeps RSA private-key operations off the server.
+- **Library**: `voprf 0.6.0-pre.2`, pinned exactly. 0.5 pulls `crypto-bigint 0.5` (RUSTSEC-2026-0387, timing); 0.6 uses crypto-bigint 0.7.11 and the same curve25519-dalek 5 as `snow-psi`. Move to 0.6.0 when it is released.
+- **Token earning is per chat, at the end** (the "nobody reported me" rule), rather than for any chat that simply wasn't reported. Self-dealing (one person running both sides for 5 min) can still farm tokens; the cost is PoW + 5 min per token, and the trusted queue's value depends on it staying expensive. Revisit with real data (e.g. raise `GOOD_AFTER_SECS` or `TRUSTED_MIN`).
+- **Key consistency** is only first-seen pinning per epoch. Stronger: ship the epoch keys inside the Phase 10 signed remote config, so every client sees the same keys.
+- The matchmaker learns one bit per join ("spent N good tokens" / "spent a VIP token"), never which ones.
