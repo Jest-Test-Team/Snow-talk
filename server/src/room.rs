@@ -1,8 +1,18 @@
 //! ChatRoom Durable Object: a blind two-slot relay.
 //!
 //! Relayed bytes are never inspected, logged or stored. The only storage is
-//! per-slot lifecycle metadata (generation + status), which is needed because the
-//! object hibernates between messages.
+//! per-slot lifecycle metadata (generation + status) and the room's reputation
+//! bookkeeping (see [`Rep`]), which is needed because the object hibernates
+//! between messages.
+//!
+//! ## Good-chat tokens and reports
+//! When one side leaves, the other gets `PeerLeft { report_secs }` and may report
+//! them during that window. A leaver's token claim is held until the window
+//! closes (or the peer leaves too), and is refused if they were reported. Only
+//! the first report in a room counts, so a reported user can't retaliate. A
+//! claim also needs a real conversation: both sides present for
+//! `GOOD_AFTER_SECS` and both having sent `MIN_ACTIVE_FRAMES`. Tokens are
+//! unlinkable (VOPRF), so the issuer never learns who it rewarded.
 use crate::ticket::{Kind, Ticket, FLAG_PARANOID};
 use crate::util::*;
 use serde::{Deserialize, Serialize};
@@ -66,6 +76,28 @@ impl Limiter {
     }
 }
 
+const DEFAULT_GOOD_AFTER_SECS: u64 = 300;
+const DEFAULT_MIN_ACTIVE_FRAMES: u32 = 10;
+const DEFAULT_REPORT_SECS: u32 = 15;
+/// Good-chat tokens per side per chat.
+const GOOD_PER_CHAT: usize = 1;
+
+/// Room-level reputation bookkeeping (in storage: it must survive hibernation).
+#[derive(Serialize, Deserialize, Default)]
+struct Rep {
+    /// When both slots were first present, ms (0 = never).
+    both_since_ms: u64,
+    /// Slot has sent at least `MIN_ACTIVE_FRAMES`.
+    active: [bool; 2],
+    reported: [bool; 2],
+    /// Claim settled (tokens or refusal sent).
+    settled: [bool; 2],
+    /// A leaver's claim, held until the report window closes.
+    claim: [Option<Vec<[u8; 32]>>; 2],
+    /// End of the report window, ms (0 = none).
+    window_until_ms: u64,
+}
+
 /// Resume tickets outlive the grace period; the room enforces the real deadline.
 const RESUME_TICKET_TTL_MS: u64 = 24 * 3600 * 1000;
 /// How long a closed room keeps its metadata before wiping it.
@@ -105,6 +137,8 @@ pub struct ChatRoom {
     held: RefCell<[VecDeque<Vec<u8>>; 2]>,
     /// Relay rate limiter per sending slot (in RAM only).
     limit: RefCell<[Limiter; 2]>,
+    /// Frames sent per slot since wake-up (RAM); persisted once as `Rep::active`.
+    sent: RefCell<[u32; 2]>,
 }
 
 fn tag(slot: u8) -> &'static str {
@@ -214,9 +248,146 @@ impl ChatRoom {
         self.schedule_alarm().await
     }
 
-    /// Point the single alarm at the earliest grace deadline.
+    fn var<T: std::str::FromStr>(&self, name: &str, default: T) -> T {
+        self.env
+            .var(name)
+            .ok()
+            .and_then(|v| v.to_string().parse().ok())
+            .unwrap_or(default)
+    }
+
+    async fn rep(&self) -> Result<Rep> {
+        Ok(self
+            .state
+            .storage()
+            .get::<Rep>("rep")
+            .await?
+            .unwrap_or_default())
+    }
+
+    async fn put_rep(&self, r: &Rep) -> Result<()> {
+        self.state.storage().put("rep", r).await
+    }
+
+    /// Count a relayed frame; persist "active" the first time the threshold is hit.
+    async fn note_activity(&self, slot: u8) -> Result<()> {
+        let n = {
+            let mut sent = self.sent.borrow_mut();
+            sent[slot as usize] = sent[slot as usize].saturating_add(1);
+            sent[slot as usize]
+        };
+        if n == self.var("MIN_ACTIVE_FRAMES", DEFAULT_MIN_ACTIVE_FRAMES) {
+            let mut r = self.rep().await?;
+            if !r.active[slot as usize] {
+                r.active[slot as usize] = true;
+                self.put_rep(&r).await?;
+            }
+        }
+        Ok(())
+    }
+
+    fn eligible(&self, r: &Rep, slot: u8) -> bool {
+        let i = slot as usize;
+        let after_ms = self.var("GOOD_AFTER_SECS", DEFAULT_GOOD_AFTER_SECS) * 1000;
+        !r.reported[i]
+            && !r.settled[i]
+            && r.active[0]
+            && r.active[1]
+            && r.both_since_ms > 0
+            && now_ms().saturating_sub(r.both_since_ms) >= after_ms
+    }
+
+    /// Answer `slot`'s claim: tokens if eligible, otherwise a refusal.
+    async fn settle(&self, r: &mut Rep, slot: u8, claim: &[[u8; 32]]) -> Result<()> {
+        let i = slot as usize;
+        if r.settled[i] {
+            return Ok(());
+        }
+        let msg = if claim.len() == GOOD_PER_CHAT && self.eligible(r, slot) {
+            let epoch = snow_tokens::epoch(now_secs());
+            let issuer = snow_tokens::Issuer::new(
+                &secret(&self.env, "TOKEN_MASTER")?,
+                snow_tokens::Kind::Good,
+                epoch,
+            )
+            .map_err(|e| Error::RustError(e.to_string()))?;
+            match issuer.issue(claim, random_bytes()) {
+                Ok((evaluated, proof)) => {
+                    event("token_issued");
+                    ServerMsg::Tokens {
+                        epoch,
+                        public_key: issuer.public_key(),
+                        evaluated,
+                        proof: [
+                            proof[..32].try_into().expect("64"),
+                            proof[32..].try_into().expect("64"),
+                        ],
+                    }
+                }
+                Err(_) => ServerMsg::NoTokens,
+            }
+        } else {
+            ServerMsg::NoTokens
+        };
+        r.settled[i] = true;
+        r.claim[i] = None;
+        self.send_to(slot, &msg).await
+    }
+
+    /// `slot` leaves (optionally reporting its peer). The first leaver waits for
+    /// the report window; the second one settles everything and closes the room.
+    async fn on_leave(&self, slot: u8, claim: Vec<[u8; 32]>, report: bool) -> Result<()> {
+        let (i, p) = (slot as usize, 1 - slot as usize);
+        let mut s = self.slot(slot).await?;
+        if s.status == SlotStatus::Left {
+            return Ok(());
+        }
+        let mut r = self.rep().await?;
+        // Only the first report counts; a reported user can't report back.
+        if report && !r.reported[i] && !r.reported[p] {
+            r.reported[p] = true;
+            event("report");
+        }
+        s.status = SlotStatus::Left;
+        self.put_slot(slot, s).await?;
+        let peer = self.slot(1 - slot).await?;
+        if peer.status == SlotStatus::Connected {
+            // First to leave: hold the claim; the peer may still report us.
+            let secs = self.var("REPORT_SECS", DEFAULT_REPORT_SECS);
+            r.claim[i] = Some(claim);
+            r.window_until_ms = now_ms() + secs as u64 * 1000;
+            self.put_rep(&r).await?;
+            self.send_to(1 - slot, &ServerMsg::PeerLeft { report_secs: secs })
+                .await?;
+            return self.schedule_alarm().await;
+        }
+        // Second to leave (or the peer is gone): settle both and close.
+        self.settle(&mut r, slot, &claim).await?;
+        if let Some(c) = r.claim[p].take() {
+            self.settle(&mut r, 1 - slot, &c).await?;
+        }
+        r.window_until_ms = 0;
+        self.put_rep(&r).await?;
+        self.close_room(None).await
+    }
+
+    /// The report window ran out: settle the waiting leaver's claim and close.
+    async fn end_window(&self) -> Result<()> {
+        let mut r = self.rep().await?;
+        for slot in 0..2u8 {
+            if let Some(c) = r.claim[slot as usize].take() {
+                self.settle(&mut r, slot, &c).await?;
+            }
+        }
+        r.window_until_ms = 0;
+        self.put_rep(&r).await?;
+        self.close_room(None).await
+    }
+
+    /// Point the single alarm at the earliest grace deadline or report window.
     async fn schedule_alarm(&self) -> Result<()> {
-        let mut next: Option<u64> = None;
+        let w = self.rep().await?.window_until_ms;
+        let mut next: Option<u64> = (w > 0).then_some(w);
         for i in 0..2 {
             let s = self.slot(i).await?;
             if s.status == SlotStatus::Disconnected {
@@ -256,6 +427,7 @@ impl DurableObject for ChatRoom {
             env,
             held: RefCell::new([VecDeque::new(), VecDeque::new()]),
             limit: RefCell::new([Limiter::default(); 2]),
+            sent: RefCell::new([0; 2]),
         }
     }
 
@@ -335,6 +507,11 @@ impl DurableObject for ChatRoom {
             if first_entry && peer.status == SlotStatus::Empty {
                 event("room_created");
             }
+            if first_entry && peer.status != SlotStatus::Empty {
+                let mut r = self.rep().await?;
+                r.both_since_ms = now_ms();
+                self.put_rep(&r).await?;
+            }
         }
         upgrade_response(pair.client)
     }
@@ -360,15 +537,11 @@ impl DurableObject for ChatRoom {
                     // Dropped, not relayed. The sender's pacer should never get here.
                     return send(&ws, &ServerMsg::Error(ErrorCode::RateLimited));
                 }
+                self.note_activity(att.slot).await?;
                 self.relay(1 - att.slot, bytes).await
             }
-            Some(ClientMsg::Leave) => {
-                let mut s = self.slot(att.slot).await?;
-                s.status = SlotStatus::Left;
-                self.put_slot(att.slot, s).await?;
-                self.close_room(Some((1 - att.slot, ServerMsg::PeerLeft)))
-                    .await
-            }
+            Some(ClientMsg::Leave { claim }) => self.on_leave(att.slot, claim, false).await,
+            Some(ClientMsg::Report { claim }) => self.on_leave(att.slot, claim, true).await,
             _ => send(&ws, &ServerMsg::Error(ErrorCode::BadFrame)),
         }
     }
@@ -390,6 +563,11 @@ impl DurableObject for ChatRoom {
     async fn alarm(&self) -> Result<Response> {
         if self.closed().await? {
             self.state.storage().delete_all().await?;
+            return Response::empty();
+        }
+        let w = self.rep().await?.window_until_ms;
+        if w > 0 && w <= now_ms() {
+            self.end_window().await?;
             return Response::empty();
         }
         for i in 0..2u8 {

@@ -20,6 +20,7 @@ mod screening;
 #[cfg(feature = "tor")]
 mod tor;
 mod transcript;
+mod wallet;
 
 pub use api::*;
 

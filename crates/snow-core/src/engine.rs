@@ -5,6 +5,7 @@ use crate::media::MediaStore;
 use crate::net::{self, NetError, Ws};
 use crate::pacer::{Item, Out, Pacer};
 use crate::transcript::Transcript;
+use crate::wallet::Wallet;
 use snow_crypto::{ChatSession, CryptoError, Handshaker, Step};
 use snow_proto::{ClientMsg, ErrorCode, Handshake, Inner, PeerEnvelope, Role, ServerMsg};
 use snow_psi::Psi;
@@ -30,6 +31,8 @@ pub enum Cmd {
         view_secs: u8,
     },
     Leave,
+    /// Report the peer and leave (no content is sent to the server).
+    Report,
     Wipe,
     /// Testing: kill the socket without a close frame, as a network drop would.
     DebugDrop,
@@ -84,9 +87,119 @@ pub struct Shared {
     pub frames: Arc<Counters>,
     /// The current chat's plaintext state.
     pub chat: Arc<PerChat>,
+    /// Anonymous tokens (persists across chats; the app saves it).
+    pub wallet: Arc<std::sync::Mutex<Wallet>>,
     /// Bootstrapped once, on the first chat in Tor mode.
     #[cfg(feature = "tor")]
     pub tor: Arc<tokio::sync::OnceCell<crate::tor::TorHandle>>,
+}
+
+/// A chat that has ended for the UI but still owes the server our good-chat
+/// claim (and, if the peer left first, our chance to report them).
+struct Settle {
+    room: Ws,
+    req: snow_tokens::Request,
+    claim: Vec<[u8; 32]>,
+    /// `Some(secs)`: the peer left first; we may report them for `secs`, and
+    /// haven't sent our claim yet. `None`: our claim is already sent.
+    window: Option<u32>,
+}
+
+struct Outcome {
+    reason: EndReason,
+    settle: Option<Settle>,
+}
+
+impl From<EndReason> for Outcome {
+    fn from(reason: EndReason) -> Self {
+        Self {
+            reason,
+            settle: None,
+        }
+    }
+}
+
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// A fresh, unlinkable good-chat token request.
+fn new_claim() -> (snow_tokens::Request, Vec<[u8; 32]>) {
+    use rand::RngCore;
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    let epoch = snow_tokens::epoch(unix_now());
+    snow_tokens::request(snow_tokens::Kind::Good, epoch, 1, seed).expect("valid batch size")
+}
+
+/// After the chat: report or not (if the peer left first), then collect tokens.
+async fn settle(
+    mut s: Settle,
+    cmds: &mut mpsc::UnboundedReceiver<Cmd>,
+    wallet: &std::sync::Mutex<Wallet>,
+    l: &dyn ChatListener,
+) {
+    use std::time::Duration;
+    if let Some(secs) = s.window {
+        // Answer a little before the room's window closes.
+        let until =
+            tokio::time::Instant::now() + Duration::from_secs(secs.saturating_sub(1) as u64);
+        let report = loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(until) => break false,
+                c = cmds.recv() => match c {
+                    Some(Cmd::Report) => break true,
+                    Some(Cmd::Wipe) => { s.room.abort().await; return }
+                    Some(Cmd::Leave) | None => break false,
+                    Some(_) => continue,
+                },
+            }
+        };
+        let claim = std::mem::take(&mut s.claim);
+        let msg = if report {
+            ClientMsg::Report { claim }
+        } else {
+            ClientMsg::Leave { claim }
+        };
+        if s.room.send(&msg).await.is_err() {
+            return;
+        }
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let answer = loop {
+        tokio::select! {
+            m = tokio::time::timeout_at(deadline, s.room.recv()) => match m {
+                Ok(Ok(m @ (ServerMsg::Tokens { .. } | ServerMsg::NoTokens))) => break Some(m),
+                Ok(Ok(_)) => continue,
+                _ => break None,
+            },
+            c = cmds.recv() => if matches!(c, Some(Cmd::Wipe)) { break None },
+        }
+    };
+    if let Some(ServerMsg::Tokens {
+        epoch,
+        public_key,
+        evaluated,
+        proof,
+    }) = answer
+    {
+        let mut p = [0u8; 64];
+        p[..32].copy_from_slice(&proof[0]);
+        p[32..].copy_from_slice(&proof[1]);
+        let mut w = wallet.lock().unwrap();
+        // The proof binds the tokens to `public_key`; pinning the key per epoch
+        // stops the server from tagging us with a key of our own.
+        if w.pin(snow_tokens::Kind::Good, epoch, public_key).is_ok() {
+            if let Ok(tokens) = s.req.finish(&public_key, &evaluated, &p) {
+                w.add(tokens);
+                drop(w);
+                l.on_wallet_changed();
+            }
+        }
+    }
+    s.room.close().await;
 }
 
 async fn dialer(
@@ -120,15 +233,20 @@ pub async fn run(
     shared: Shared,
 ) {
     let per_chat = shared.chat.clone();
-    let reason = match run_inner(&cfg, &mut cmds, &*l, shared).await {
-        Ok(r) => r,
+    let wallet = shared.wallet.clone();
+    let out = match run_inner(&cfg, &mut cmds, &*l, shared).await {
+        Ok(o) => o,
         Err(e) => EndReason::Error {
             message: e.to_string(),
-        },
+        }
+        .into(),
     };
     // The chat is over: zeroize its plaintext before telling the UI.
     per_chat.wipe();
-    l.on_state(ChatState::Ended { reason });
+    l.on_state(ChatState::Ended { reason: out.reason });
+    if let Some(s) = out.settle {
+        settle(s, &mut cmds, &wallet, &*l).await;
+    }
 }
 
 fn relay(env: &PeerEnvelope) -> ClientMsg {
@@ -140,12 +258,9 @@ async fn run_inner(
     cmds: &mut mpsc::UnboundedReceiver<Cmd>,
     l: &dyn ChatListener,
     shared: Shared,
-) -> Result<EndReason, EngineError> {
+) -> Result<Outcome, EngineError> {
     let base = cfg.server_url.trim_end_matches('/');
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let bucket = interests::bucket(cfg, now);
+    let bucket = interests::bucket(cfg, unix_now());
 
     // 1. Proof of work.
     l.on_state(ChatState::SolvingPow);
@@ -164,19 +279,21 @@ async fn run_inner(
         pow: snow_proto::PowSolution { challenge, nonce },
         bucket: (bucket != interests::RANDOM_BUCKET).then_some(bucket),
         paranoid: cfg.paranoid,
+        trusted: false,
+        spend: Vec::new(),
     })
     .await?;
     let (ticket, role, paranoid) = loop {
         tokio::select! {
             m = mm.recv() => match m? {
-                ServerMsg::Matched { ticket, role, paranoid } => break (ticket, role, paranoid),
+                ServerMsg::Matched { ticket, role, paranoid, .. } => break (ticket, role, paranoid),
                 ServerMsg::Error(c) => return Err(EngineError::Server(c)),
                 _ => return Err(EngineError::Protocol),
             },
             c = cmds.recv() => match c {
                 Some(Cmd::Send { .. } | Cmd::Control(_) | Cmd::Media(_) | Cmd::MediaOpened { .. } | Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Foreground(_)) => continue,
-                Some(Cmd::Wipe) => { mm.close().await; return Ok(EndReason::Wiped) }
-                Some(Cmd::Leave) | None => { mm.close().await; return Ok(EndReason::Cancelled) }
+                Some(Cmd::Wipe) => { mm.close().await; return Ok(EndReason::Wiped.into()) }
+                Some(Cmd::Leave | Cmd::Report) | None => { mm.close().await; return Ok(EndReason::Cancelled.into()) }
             },
         }
     };
@@ -246,7 +363,16 @@ async fn run_inner(
             }
             m = room.recv() => match m {
                 Ok(m) => match chat.on_server(m, &mut room, l).await? {
-                    Some(end) => return Ok(end),
+                    Some(EndReason::PeerLeft) => {
+                        // Still connected: we may report them, and we claim our token.
+                        let (req, claim) = new_claim();
+                        let window = Some(chat.report_secs);
+                        return Ok(Outcome {
+                            reason: EndReason::PeerLeft,
+                            settle: Some(Settle { room, req, claim, window }),
+                        });
+                    }
+                    Some(end) => return Ok(end.into()),
                     None => false,
                 },
                 Err(NetError::Closed | NetError::Io(_)) => true,
@@ -269,10 +395,20 @@ async fn run_inner(
                 Some(Cmd::Media(items)) => { pacer.push_bulk(items.into_iter().map(Item::Control)); false }
                 Some(Cmd::MediaOpened { id, view_secs }) => { chat.media_opened(id, view_secs, &mut pacer); false }
                 Some(Cmd::Foreground(f)) => { foreground = f; false }
-                Some(Cmd::Leave) => {
-                    let _ = room.send(&ClientMsg::Leave).await;
-                    room.close().await;
-                    return Ok(EndReason::SelfLeft);
+                Some(c @ (Cmd::Leave | Cmd::Report)) => {
+                    let report = matches!(c, Cmd::Report);
+                    let (req, claim) = new_claim();
+                    let msg = if report {
+                        ClientMsg::Report { claim: claim.clone() }
+                    } else {
+                        ClientMsg::Leave { claim: claim.clone() }
+                    };
+                    let _ = room.send(&msg).await;
+                    let reason = if report { EndReason::Reported } else { EndReason::SelfLeft };
+                    return Ok(Outcome {
+                        reason,
+                        settle: Some(Settle { room, req, claim, window: None }),
+                    });
                 }
                 Some(Cmd::DebugDrop) => { room.abort().await; true }
                 Some(Cmd::DebugFlood(n)) => {
@@ -282,13 +418,13 @@ async fn run_inner(
                     }
                     lost
                 }
-                Some(Cmd::Wipe) | None => { room.close().await; return Ok(EndReason::Wiped) }
+                Some(Cmd::Wipe) | None => { room.close().await; return Ok(EndReason::Wiped.into()) }
             },
         };
         if let Some(end) = chat.ending.take() {
-            let _ = room.send(&ClientMsg::Leave).await;
+            let _ = room.send(&ClientMsg::Leave { claim: Vec::new() }).await;
             room.close().await;
-            return Ok(end);
+            return Ok(end.into());
         }
         if lost {
             match reconnect(&netw, room_url, &mut resume, cmds, &mut outbox, l).await? {
@@ -300,7 +436,7 @@ async fn run_inner(
                         ChatState::Handshaking { paranoid }
                     });
                 }
-                Reconnect::End(r) => return Ok(r),
+                Reconnect::End(r) => return Ok(r.into()),
             }
         }
     }
@@ -375,7 +511,7 @@ async fn reconnect(
             c = cmds.recv() => match c {
                 Some(c @ (Cmd::Send { .. } | Cmd::Control(_) | Cmd::Media(_) | Cmd::MediaOpened { .. } | Cmd::Foreground(_))) => outbox.push(c),
                 Some(Cmd::DebugDrop | Cmd::DebugFlood(_)) => {}
-                Some(Cmd::Leave) => return Ok(Reconnect::End(EndReason::SelfLeft)),
+                Some(Cmd::Leave | Cmd::Report) => return Ok(Reconnect::End(EndReason::SelfLeft)),
                 Some(Cmd::Wipe) | None => return Ok(Reconnect::End(EndReason::Wiped)),
             },
         }
@@ -400,6 +536,8 @@ struct Chat {
     ending: Option<EndReason>,
     /// When each opened media item's view time runs out.
     media_deadlines: Vec<(tokio::time::Instant, u64)>,
+    /// From `PeerLeft`: how long we may still report the peer.
+    report_secs: u32,
     commit: Option<Handshake>,
     hs: Option<Handshaker>,
     session: Option<ChatSession>,
@@ -419,6 +557,7 @@ impl Chat {
             outgoing: VecDeque::new(),
             ending: None,
             media_deadlines: Vec::new(),
+            report_secs: 0,
             commit: Some(commit),
             hs: Some(hs),
             session: None,
@@ -476,7 +615,10 @@ impl Chat {
                     postcard::from_bytes(&bytes).map_err(|_| EngineError::Protocol)?;
                 self.on_envelope(env, room, l).await?;
             }
-            ServerMsg::PeerLeft => return Ok(Some(EndReason::PeerLeft)),
+            ServerMsg::PeerLeft { report_secs } => {
+                self.report_secs = report_secs;
+                return Ok(Some(EndReason::PeerLeft));
+            }
             ServerMsg::PeerGone => return Ok(Some(EndReason::PeerGone)),
             ServerMsg::PeerDisconnected { grace_secs } => {
                 self.peer_online = false;
@@ -495,7 +637,11 @@ impl Chat {
                     .fetch_add(1, Ordering::Relaxed);
             }
             ServerMsg::Error(c) => return Err(EngineError::Server(c)),
-            ServerMsg::Rotate { .. } | ServerMsg::Joined { .. } | ServerMsg::Matched { .. } => {}
+            ServerMsg::Rotate { .. }
+            | ServerMsg::Joined { .. }
+            | ServerMsg::Matched { .. }
+            | ServerMsg::Tokens { .. }
+            | ServerMsg::NoTokens => {}
         }
         Ok(None)
     }

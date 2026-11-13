@@ -7,7 +7,10 @@ fn rng() -> rand::rngs::OsRng {
 #[test]
 fn every_frame_is_fixed_length_and_roundtrips() {
     let msgs = [
-        ClientMsg::Leave,
+        ClientMsg::Leave { claim: vec![] },
+        ClientMsg::Report {
+            claim: vec![[3; 32]],
+        },
         ClientMsg::Relay(vec![7; 10]),
         ClientMsg::Relay(vec![7; 3900]),
         ClientMsg::Join {
@@ -17,6 +20,8 @@ fn every_frame_is_fixed_length_and_roundtrips() {
             },
             bucket: Some(3),
             paranoid: true,
+            trusted: true,
+            spend: vec![vec![9; 101]; 3],
         },
     ];
     for m in msgs {
@@ -32,7 +37,7 @@ fn rejects_wrong_length_version_and_oversize() {
         decode_frame::<ClientMsg>(&[1; 10]),
         Err(FrameError::BadLength(10))
     );
-    let mut f = encode_frame(&ClientMsg::Leave, &mut rng()).unwrap();
+    let mut f = encode_frame(&ClientMsg::Leave { claim: vec![] }, &mut rng()).unwrap();
     f[0] = 9;
     assert_eq!(
         decode_frame::<ClientMsg>(&f),

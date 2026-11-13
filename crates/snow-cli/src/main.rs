@@ -4,7 +4,7 @@
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
-//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|safety|grace]
+//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|safety|goodchat|report|grace]
 //!                    [--tag TEXT]... [--nick NAME]
 //!                    [--paranoid] [--chaff MS]
 //! ```
@@ -24,6 +24,9 @@
 //! * `disjoint`  — same bucket, no shared tags: both leave with `NoCommonTags`
 //! * `media`     — a flash photo with GPS EXIF arrives clean, opens once, burns
 //! * `safety`    — a scam pitch arrives blurred with reasons; small talk stays clean
+//! * `goodchat`  — after a real chat both sides earn one unlinkable token
+//! * `report`    — A leaves, B reports A in the window: only B earns a token
+//!   (run the relay with short `GOOD_AFTER_SECS` / `REPORT_SECS`)
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
@@ -43,6 +46,7 @@ enum Ev {
     Profile(UserProfile),
     Media(MediaInfo),
     MediaBurned(u64, bool),
+    Wallet,
 }
 
 struct Chan(Sender<Ev>);
@@ -73,6 +77,9 @@ impl ChatListener for Chan {
     }
     fn on_media_burned(&self, id: u64, from_me: bool) {
         let _ = self.0.send(Ev::MediaBurned(id, from_me));
+    }
+    fn on_wallet_changed(&self) {
+        let _ = self.0.send(Ev::Wallet);
     }
 }
 
@@ -220,6 +227,7 @@ fn chat(a: &Args) {
                     println!("* peer sent {:?} #{} (view {}s)", m.kind, m.id, m.view_secs)
                 }
                 Ev::MediaBurned(id, mine) => println!("* media #{id} burned (mine: {mine})"),
+                Ev::Wallet => println!("* earned a good-chat token"),
             }
         }
     });
@@ -227,6 +235,8 @@ fn chat(a: &Args) {
         let line = line.unwrap_or_default();
         if line == "/leave" {
             c.leave();
+        } else if line == "/report" {
+            c.report();
         } else if let Err(e) = c.send_text(line, 0) {
             println!("! {e}");
         }
@@ -553,6 +563,37 @@ fn pair_test(a: &Args) -> Result<(), String> {
                 println!("{text:?} → {:?} {:?}", m.safety, m.safety_flags);
             }
         }
+        "goodchat" | "report" => {
+            // Long enough for the relay's (shortened) GOOD_AFTER_SECS.
+            std::thread::sleep(Duration::from_millis(1500));
+            pair.exchange(1, "before-leave")?;
+            ca.leave();
+            wait(&rb, "B sees peer left", |ev| ended(ev, EndReason::PeerLeft))?;
+            if a.scenario == "report" {
+                cb.report();
+            }
+            wallet_event(&rb, "B's token")?;
+            let a_got = if a.scenario == "report" {
+                std::thread::sleep(Duration::from_secs(2));
+                ra.try_iter().any(|ev| matches!(ev, Ev::Wallet))
+            } else {
+                wallet_event(&ra, "A's token")?;
+                true
+            };
+            let (ta, tb) = (ca.good_tokens(), cb.good_tokens());
+            println!("tokens: A={ta} B={tb}");
+            let want_a = u32::from(a.scenario != "report");
+            if ta != want_a || tb != 1 || a_got != (want_a == 1) {
+                return Err(format!("expected A={want_a} B=1, got A={ta} B={tb}"));
+            }
+            // The wallet survives an export/import round trip (app persistence).
+            let saved = cb.wallet_export();
+            let (fresh, _rx) = client(&a2);
+            fresh.wallet_import(saved).map_err(|e| e.to_string())?;
+            if fresh.good_tokens() != 1 {
+                return Err("wallet import lost tokens".into());
+            }
+        }
         "grace" => {
             ca.panic_wipe();
             let g = wait(&rb, "B sees disconnect", |ev| match ev {
@@ -566,6 +607,18 @@ fn pair_test(a: &Args) -> Result<(), String> {
         other => return Err(format!("unknown scenario {other}")),
     }
     Ok(())
+}
+
+/// Tokens arrive after the chat has ended for the UI, so skip `Ended` events.
+fn wallet_event(rx: &Receiver<Ev>, what: &str) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(Ev::Wallet) => return Ok(()),
+            Ok(_) => continue,
+            Err(_) => return Err(format!("timed out waiting for {what}")),
+        }
+    }
 }
 
 /// A 320×240 JPEG with an EXIF segment carrying `exif`.

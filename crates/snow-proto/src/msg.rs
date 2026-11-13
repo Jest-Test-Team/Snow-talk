@@ -38,11 +38,20 @@ pub enum ClientMsg {
         /// Ask for paranoid mode (constant-rate cover traffic, a VIP perk).
         /// The matchmaker decides; see [`ServerMsg::Matched::paranoid`].
         paranoid: bool,
+        /// Ask for the trusted queue (only matched with other trusted users).
+        trusted: bool,
+        /// Tokens spent on this join (postcard-encoded `snow_tokens::Token`s):
+        /// good-chat tokens for `trusted`, a VIP token for `paranoid`.
+        spend: Vec<Vec<u8>>,
     },
     /// Opaque peer bytes. The relay forwards these unchanged and never parses them.
     Relay(Vec<u8>),
-    /// Deliberate exit: the peer is told immediately and the room closes.
-    Leave,
+    /// Deliberate exit. `claim`: blinded elements for a good-chat token, issued
+    /// once the peer has had a chance to report (empty = no claim).
+    Leave { claim: Vec<[u8; 32]> },
+    /// Report the peer (no content is sent) and leave. The peer gets no token
+    /// for this chat; the reporter may still claim one.
+    Report { claim: Vec<[u8; 32]> },
 }
 
 /// Server → client.
@@ -55,6 +64,8 @@ pub enum ServerMsg {
         /// Paranoid mode granted: the room allows a constant cover-traffic rate
         /// for this slot. If `false`, the client must not send chaff.
         paranoid: bool,
+        /// Placed in the trusted queue (tokens accepted).
+        trusted: bool,
     },
     /// Joined the room. `resume` reconnects to the same slot within the grace period.
     Joined {
@@ -68,14 +79,26 @@ pub enum ServerMsg {
         grace_secs: u32,
     },
     PeerReconnected,
-    /// The peer pressed "leave".
-    PeerLeft,
+    /// The peer pressed "leave". We may still report them for `report_secs`.
+    PeerLeft {
+        report_secs: u32,
+    },
     /// The grace period expired without the peer coming back.
     PeerGone,
     /// Session-ID rotation: reconnect with this ticket; the old one is revoked.
     Rotate {
         ticket: String,
     },
+    /// Good-chat tokens for our claim (see `snow-tokens`). The client checks
+    /// `proof` against `public_key` and pins that key for the epoch.
+    Tokens {
+        epoch: u32,
+        public_key: [u8; 32],
+        evaluated: Vec<[u8; 32]>,
+        proof: [[u8; 32]; 2],
+    },
+    /// Our claim was refused (reported, too short, or already issued).
+    NoTokens,
     Error(ErrorCode),
 }
 

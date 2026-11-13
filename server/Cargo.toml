@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 worker = "0.9"
 snow-proto = { path = "../crates/snow-proto" }
+snow-tokens = { path = "../crates/snow-tokens" }
 snow-pow = { path = "../crates/snow-pow" }
 serde = { version = "1", features = ["derive"] }
 hmac = "0.12"

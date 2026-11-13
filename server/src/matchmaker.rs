@@ -128,6 +128,8 @@ impl DurableObject for Matchmaker {
             pow,
             bucket,
             paranoid,
+            trusted: _,
+            spend: _,
         }) = decode(msg)
         else {
             return Self::reject(&ws, ErrorCode::BadFrame);
@@ -189,6 +191,7 @@ impl DurableObject for Matchmaker {
                     ticket: ticket(slot, a.paranoid),
                     role,
                     paranoid: a.paranoid,
+                    trusted: false,
                 },
             )?;
             sock.close(Some(1000), Some("matched"))?;

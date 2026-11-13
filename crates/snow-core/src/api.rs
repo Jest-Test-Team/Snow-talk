@@ -66,6 +66,8 @@ pub enum EndReason {
     Wiped,
     /// The private tag comparison found nothing in common; we left.
     NoCommonTags,
+    /// We reported the peer and left.
+    Reported,
     Error {
         message: String,
     },
@@ -180,6 +182,8 @@ pub enum CoreError {
     BadMedia,
     #[error("media already opened or not available")]
     MediaGone,
+    #[error("wallet data is corrupt")]
+    BadWallet,
 }
 
 /// Implemented by the UI (Swift / Kotlin) to receive events. Called from a background thread.
@@ -203,6 +207,9 @@ pub trait ChatListener: Send + Sync {
     /// A media item is gone: `from_me = false` → our view time is up, stop
     /// showing it now; `from_me = true` → the peer opened what we sent.
     fn on_media_burned(&self, id: u64, from_me: bool);
+    /// Tokens were added or spent: persist [`SnowClient::wallet_export`] now
+    /// (Keychain / Keystore). This is the only state the app should keep.
+    fn on_wallet_changed(&self);
 }
 
 /// One chat client. A new chat calls [`SnowClient::start_match`] again; every
@@ -240,11 +247,12 @@ impl SnowClient {
         })
     }
 
-    /// Solve the PoW, queue, and chat. Any previous chat is wiped first.
+    /// Solve the PoW, queue, and chat. A previous chat is left first (it still
+    /// collects its good-chat token in the background); its plaintext is wiped.
     pub fn start_match(&self) {
         let (tx, rx) = mpsc::unbounded_channel();
         if let Some(old) = self.cmd.lock().unwrap().replace(tx) {
-            let _ = old.send(Cmd::Wipe);
+            let _ = old.send(Cmd::Leave);
         }
         let chat = Arc::new(PerChat::default());
         *self.chat.lock().unwrap() = chat.clone();
@@ -323,6 +331,35 @@ impl SnowClient {
     /// Tell the peer we left, then end the chat.
     pub fn leave(&self) {
         let _ = self.command(Cmd::Leave);
+    }
+
+    /// Report the peer and leave. Works during the chat and for a few seconds
+    /// after `Ended { PeerLeft }`. Nothing about the conversation is sent: the
+    /// only effect is that the peer earns no good-chat token from this chat.
+    pub fn report(&self) {
+        let _ = self.command(Cmd::Report);
+    }
+
+    /// Good-chat tokens currently spendable.
+    pub fn good_tokens(&self) -> u32 {
+        let epoch = snow_tokens::epoch(engine::unix_now());
+        self.shared
+            .wallet
+            .lock()
+            .unwrap()
+            .count(snow_tokens::Kind::Good, epoch)
+    }
+
+    /// Serialized wallet, for the app to store in the Keychain / Keystore.
+    pub fn wallet_export(&self) -> Vec<u8> {
+        self.shared.wallet.lock().unwrap().export()
+    }
+
+    /// Restore a wallet saved with [`Self::wallet_export`] (call before `start_match`).
+    pub fn wallet_import(&self, bytes: Vec<u8>) -> Result<(), CoreError> {
+        let w = crate::wallet::Wallet::import(&bytes).ok_or(CoreError::BadWallet)?;
+        *self.shared.wallet.lock().unwrap() = w;
+        Ok(())
     }
 
     /// Call from the app lifecycle: cover traffic pauses in the background.
