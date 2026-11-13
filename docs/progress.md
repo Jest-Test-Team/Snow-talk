@@ -162,3 +162,30 @@ Options: (a) accept it as the cost of strong cover traffic; (b) chaff period > 1
 - **Token earning is per chat, at the end** (the "nobody reported me" rule), rather than for any chat that simply wasn't reported. Self-dealing (one person running both sides for 5 min) can still farm tokens; the cost is PoW + 5 min per token, and the trusted queue's value depends on it staying expensive. Revisit with real data (e.g. raise `GOOD_AFTER_SECS` or `TRUSTED_MIN`).
 - **Key consistency** is only first-seen pinning per epoch. Stronger: ship the epoch keys inside the Phase 10 signed remote config, so every client sees the same keys.
 - The matchmaker learns one bit per join ("spent N good tokens" / "spent a VIP token"), never which ones.
+
+## Phase 10 — Monetization (server / Rust part done 2026-11-13; Google Play and native UI pending)
+
+**Plan vs. done**
+- ✅ **Signed remote config** (`snow-config`): Ed25519 over a JSON body (`SNOWCFG1 ‖ sig ‖ json`), with expiry, a 45-day lifetime cap and rollback protection (highest version seen). It carries `chaff_ms`, feature switches (donations / lightning / voice / photos), **the token issuer keys per epoch**, and the sponsor catalog's SHA-256. It is signed **offline** (`snow-config` tool, `--features tool`); the relay only serves `config.bin` from R2 and can't forge it. The client fetches it at match start when `Config::config_key` is set and keeps the last valid copy if a fetch fails. This closes the Phase 9 follow-up: a relay that hands someone its own issuer key is refused (E2E `config-tagging`: A=0, B=0).
+- ✅ **Sponsored tags**: `catalog.json` in R2, pinned by hash in the config. The client downloads the whole catalog and picks up to 3 cards for its own tags (weighted rotation), so the relay never learns which tags you have. Links must be `https://` with no query or fragment (no per-user tracking parameters); no ad SDK. `ChatListener::on_sponsors` fires while queued. E2E `config`: both sides were shown the coffee sponsor first.
+- ✅ **24 h hold (VIP)**: `extend_chat()` spends a VIP token (`EXTEND_GRANT=open` in dev). The room then holds both slots for `EXTEND_SECS` (24 h), even if both sides go offline, and **tells both sides** (`PeerEvent::Extended { by_me }`), so the UI can warn that the peer may keep a saved copy.
+  - `suspend(key)` seals the vodozemac pickle, the resume ticket and the non-burning messages under an HKDF-split app key (ChaCha20-Poly1305), then disconnects without leaving.
+  - `resume_saved(blob, key)` works from a brand-new client.
+  - Burn-after-reading messages and media are never saved.
+  - E2E `extend`: the session outlives the 4 s grace, the wrong key is refused, the message sent while away arrives, and the chat continues.
+- ✅ **IAP → blind VIP tokens, App Store**: `POST /tokens/vip` verifies the StoreKit 2 `jwsRepresentation` offline.
+  - The `x5c` chain must end in the pinned **Apple Root CA - G3** (fingerprint `63343abf…9179`, checked in a test), carry Apple's leaf and intermediate OIDs, and chain-verify at `signedDate`. The payload is then ES256-verified.
+  - Policy (`APPLE_BUNDLE_ID`, `APPLE_PRODUCTS = id:count`, `APPLE_SANDBOX`) refuses other apps, refunds and, by default, sandbox purchases.
+  - The `Redemptions` DO stores `hash(transaction id) → hash(blinded)`: a lost response can be retried with the identical request, which the wallet keeps a seed for, but a second request for the same purchase is refused.
+  - E2E `vip` (test CA, accepted only in `--features e2e-test-root` builds): a purchase buys 5 tokens; a replay, a foreign product and a forgery are refused.
+  - Native tests cover a wrong root, a spliced chain, a leaf without the marker OID, and a payload swapped after signing.
+- ⏳ **Google Play**: needs a service account for the Play Developer API. `Store::Google` is answered with `Unsupported`.
+- ⏳ **Donations / cosmetics / Lightning (Android, Breez SDK)**: these are client-side and native. The remote-config switches exist; the UI waits for Xcode and Android Studio.
+
+**Deviations**
+- **Fast Pass (`priority` queue) dropped.** I built it and the E2E test showed it can't work: the matchmaker pairs the first two compatible people immediately, so there is never a line of compatible waiters to jump. A VIP arriving while someone waits is matched at once, which happens for free anyway. Selling it would mean charging for nothing. Revisit only if matching ever becomes selective (e.g. filters), and then it must be shown to shorten waits.
+- **"進階篩選" (match only with trusted users)** is already the Phase 9 trusted queue (paid with good-chat tokens, not money). It stays reputation-based, so trust can't simply be bought.
+- **Saved sessions include non-burning messages**, not only the ratchet. Without them a resumed chat would come back blank. The blob is useless without the hardware-backed key, and the UI must state that an encrypted copy stays on the device.
+- **Remote config is fail-open.** If the relay withholds it, the client keeps the last valid copy and falls back to first-seen key pinning. Withholding can only remove features; it can't forge them.
+- **Dependency hygiene**: p256/p384 0.13 pull crypto-bigint 0.5 (RUSTSEC-2026-0387), so the IAP code uses p256/p384 0.14 and x509-cert 0.3. CI now also runs the server's unit tests and its advisory check.
+- The relay sees one transaction per purchase (which Apple can tie to an Apple ID). Tokens are blinded, so spending can't be linked to the purchase. But redeeming right before the first spend narrows timing. The app should redeem in the background on purchase, not just in time.
