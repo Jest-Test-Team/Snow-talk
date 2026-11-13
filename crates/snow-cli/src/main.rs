@@ -4,7 +4,7 @@
 //! snow-cli chat      [--server URL] [--bucket N]
 //! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
-//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|grace]
+//!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|grace]
 //!                    [--paranoid] [--chaff MS]
 //! ```
 //! `pair-test` runs two clients in one process, pairs them, exchanges messages in
@@ -17,6 +17,8 @@
 //!   clients must emit cover frames at the configured rate, and stop in the background
 //! * `free`      — no paranoid mode: no cover frames at all, bursts still delivered
 //! * `flood`     — a client bypassing its pacer must be rate-limited by the room
+//! * `burn`      — a 2 s burn-after-reading message vanishes on both sides, and
+//!   a screenshot notice reaches the peer
 //! * `grace`     — A vanishes; B must see `Disconnected` then `PeerGone`
 //!   (run the relay with a short `GRACE_SECS`)
 use snow_core::*;
@@ -31,6 +33,7 @@ enum Ev {
     Sas(Vec<String>),
     Msg(ChatMessage),
     Peer(PeerEvent),
+    Burn(u64, bool),
 }
 
 struct Chan(Sender<Ev>);
@@ -46,6 +49,9 @@ impl ChatListener for Chan {
     }
     fn on_peer(&self, e: PeerEvent) {
         let _ = self.0.send(Ev::Peer(e));
+    }
+    fn on_burn(&self, id: u64, from_me: bool) {
+        let _ = self.0.send(Ev::Burn(id, from_me));
     }
 }
 
@@ -170,6 +176,7 @@ fn chat(a: &Args) {
                 Ev::Sas(e) => println!("* verify with your peer: {}", e.join(" ")),
                 Ev::Msg(m) => println!("< {}", m.body),
                 Ev::Peer(p) => println!("* peer: {p:?}"),
+                Ev::Burn(id, mine) => println!("* burned #{id} (mine: {mine})"),
             }
         }
     });
@@ -357,6 +364,35 @@ fn pair_test(a: &Args) -> Result<(), String> {
             std::thread::sleep(Duration::from_secs(3));
             pair.exchange(1, "after-flood")?;
             println!("chat still works after the flood");
+        }
+        "burn" => {
+            let body = format!("{} burn-me", a.marker);
+            let id = ca.send_text(body.clone(), 2).map_err(|e| e.to_string())?;
+            let (rid, ttl) = wait(&rb, "burn msg", |ev| match ev {
+                Ev::Msg(m) if m.body == body => Some((m.id, m.ttl_secs)),
+                _ => None,
+            })?;
+            if ttl != 2 || !cb.transcript().iter().any(|m| m.id == rid && !m.from_me) {
+                return Err("receiver transcript is missing the message".into());
+            }
+            let t = Instant::now();
+            wait(&ra, "A burns", |ev| {
+                (matches!(ev, Ev::Burn(i, true) if *i == id)).then_some(())
+            })?;
+            wait(&rb, "B burns", |ev| {
+                (matches!(ev, Ev::Burn(i, false) if *i == rid)).then_some(())
+            })?;
+            for (c, who) in [(&ca, "A"), (&cb, "B")] {
+                if c.transcript().iter().any(|m| m.body == body) {
+                    return Err(format!("{who} still holds a burned message"));
+                }
+            }
+            println!("burned on both sides after {:?}", t.elapsed());
+            ca.notify_screen_captured();
+            wait(&rb, "screenshot notice", |ev| {
+                matches!(ev, Ev::Peer(PeerEvent::ScreenCaptured)).then_some(())
+            })?;
+            println!("screenshot notice delivered");
         }
         "grace" => {
             ca.panic_wipe();

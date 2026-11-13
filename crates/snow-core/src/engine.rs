@@ -1,7 +1,8 @@
 //! The per-chat async task: PoW → queue → room → handshake → chat.
 use crate::api::*;
 use crate::net::{self, NetError, Ws};
-use crate::pacer::{Out, Pacer};
+use crate::pacer::{Item, Out, Pacer};
+use crate::transcript::Transcript;
 use snow_crypto::{ChatSession, CryptoError, Handshaker, Step};
 use snow_proto::{ClientMsg, ErrorCode, Handshake, Inner, PeerEnvelope, Role, ServerMsg};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +16,8 @@ pub enum Cmd {
         body: Zeroizing<String>,
         ttl_secs: u32,
     },
+    /// An encrypted control message for the peer (sent through the pacer).
+    Control(Inner),
     Leave,
     Wipe,
     /// Testing: kill the socket without a close frame, as a network drop would.
@@ -53,6 +56,8 @@ enum EngineError {
 #[derive(Default, Clone)]
 pub struct Shared {
     pub frames: Arc<Counters>,
+    /// The current chat's messages (see [`crate::transcript`]).
+    pub transcript: Arc<std::sync::Mutex<Transcript>>,
     /// Bootstrapped once, on the first chat in Tor mode.
     #[cfg(feature = "tor")]
     pub tor: Arc<tokio::sync::OnceCell<crate::tor::TorHandle>>,
@@ -88,12 +93,15 @@ pub async fn run(
     l: Arc<dyn ChatListener>,
     shared: Shared,
 ) {
+    let transcript = shared.transcript.clone();
     let reason = match run_inner(&cfg, &mut cmds, &*l, shared).await {
         Ok(r) => r,
         Err(e) => EndReason::Error {
             message: e.to_string(),
         },
     };
+    // The chat is over: zeroize its plaintext before telling the UI.
+    transcript.lock().unwrap().clear();
     l.on_state(ChatState::Ended { reason });
 }
 
@@ -137,7 +145,7 @@ async fn run_inner(
                 _ => return Err(EngineError::Protocol),
             },
             c = cmds.recv() => match c {
-                Some(Cmd::Send { .. } | Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Foreground(_)) => continue,
+                Some(Cmd::Send { .. } | Cmd::Control(_) | Cmd::DebugDrop | Cmd::DebugFlood(_) | Cmd::Foreground(_)) => continue,
                 Some(Cmd::Wipe) => { mm.close().await; return Ok(EndReason::Wiped) }
                 Some(Cmd::Leave) | None => { mm.close().await; return Ok(EndReason::Cancelled) }
             },
@@ -150,7 +158,7 @@ async fn run_inner(
     l.on_state(ChatState::Handshaking { paranoid });
     let room_url = "/room";
     let (mut room, mut resume, peer_present) = join_room(&netw, room_url, &ticket).await?;
-    let mut chat = Chat::new(role, shared.frames.clone());
+    let mut chat = Chat::new(role, shared.clone());
     if peer_present {
         chat.send_commit(&mut room).await?;
     }
@@ -165,17 +173,27 @@ async fn run_inner(
         // Anything typed while we were reconnecting goes back into the queue.
         for c in std::mem::take(&mut outbox) {
             match c {
-                Cmd::Send { id, body, ttl_secs } => pacer.push(id, body, ttl_secs),
+                Cmd::Send { id, body, ttl_secs } => pacer.push(Item::Text { id, body, ttl_secs }),
+                Cmd::Control(i) => pacer.push(Item::Control(i)),
                 Cmd::Foreground(f) => foreground = f,
                 _ => {}
             }
         }
         let cover = foreground && chat.peer_online;
+        let next_burn = shared.transcript.lock().unwrap().next_burn();
         let lost = tokio::select! {
             out = pacer.next(cover), if chat.session.is_some() => match out {
-                Out::Text(p) => chat.send_text(&mut room, p.id, &p.body, p.ttl_secs).await.is_err(),
+                Out::Send(Item::Text { id, body, ttl_secs }) => chat.send_text(&mut room, id, &body, ttl_secs).await.is_err(),
+                Out::Send(Item::Control(i)) => chat.send_inner(&mut room, &i).await.is_err(),
                 Out::Chaff => chat.send_chaff(&mut room).await.is_err(),
             },
+            _ = tokio::time::sleep_until(next_burn.unwrap_or_else(tokio::time::Instant::now)), if next_burn.is_some() => {
+                let burned = shared.transcript.lock().unwrap().burn_due(tokio::time::Instant::now());
+                for (id, from_me) in burned {
+                    l.on_burn(id, from_me);
+                }
+                false
+            }
             m = room.recv() => match m {
                 Ok(m) => match chat.on_server(m, &mut room, l).await? {
                     Some(end) => return Ok(end),
@@ -196,7 +214,8 @@ async fn run_inner(
                 false
             }
             c = cmds.recv() => match c {
-                Some(Cmd::Send { id, body, ttl_secs }) => { pacer.push(id, body, ttl_secs); false }
+                Some(Cmd::Send { id, body, ttl_secs }) => { pacer.push(Item::Text { id, body, ttl_secs }); false }
+                Some(Cmd::Control(i)) => { pacer.push(Item::Control(i)); false }
                 Some(Cmd::Foreground(f)) => { foreground = f; false }
                 Some(Cmd::Leave) => {
                     let _ = room.send(&ClientMsg::Leave).await;
@@ -297,7 +316,7 @@ async fn reconnect(
         tokio::select! {
             _ = tokio::time::sleep(backoff.min(left)) => {}
             c = cmds.recv() => match c {
-                Some(c @ (Cmd::Send { .. } | Cmd::Foreground(_))) => outbox.push(c),
+                Some(c @ (Cmd::Send { .. } | Cmd::Control(_) | Cmd::Foreground(_))) => outbox.push(c),
                 Some(Cmd::DebugDrop | Cmd::DebugFlood(_)) => {}
                 Some(Cmd::Leave) => return Ok(Reconnect::End(EndReason::SelfLeft)),
                 Some(Cmd::Wipe) | None => return Ok(Reconnect::End(EndReason::Wiped)),
@@ -312,19 +331,19 @@ struct Chat {
     role: Role,
     /// False while the room reports the peer as disconnected (no point sending cover traffic).
     peer_online: bool,
-    frames: Arc<Counters>,
+    shared: Shared,
     commit: Option<Handshake>,
     hs: Option<Handshaker>,
     session: Option<ChatSession>,
 }
 
 impl Chat {
-    fn new(role: Role, frames: Arc<Counters>) -> Self {
+    fn new(role: Role, shared: Shared) -> Self {
         let (hs, commit) = Handshaker::new(role);
         Self {
             role,
             peer_online: true,
-            frames,
+            shared,
             commit: Some(commit),
             hs: Some(hs),
             session: None,
@@ -364,7 +383,7 @@ impl Chat {
         };
         let env = s.encrypt(inner)?;
         room.send(&relay(&env)).await?;
-        self.frames.sent.fetch_add(1, Ordering::Relaxed);
+        self.shared.frames.sent.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
@@ -395,7 +414,10 @@ impl Chat {
             // The room dropped a frame over its rate cap. Olm tolerates the gap;
             // our pacer stays under the cap, so this means a misconfiguration.
             ServerMsg::Error(ErrorCode::RateLimited) => {
-                self.frames.rate_limited.fetch_add(1, Ordering::Relaxed);
+                self.shared
+                    .frames
+                    .rate_limited
+                    .fetch_add(1, Ordering::Relaxed);
             }
             ServerMsg::Error(c) => return Err(EngineError::Server(c)),
             ServerMsg::Rotate { .. } | ServerMsg::Joined { .. } | ServerMsg::Matched { .. } => {}
@@ -460,22 +482,25 @@ impl Chat {
                     }
                     None => return Err(EngineError::Protocol),
                 };
-                handle_inner(inner, l);
+                handle_inner(inner, &self.shared.transcript, l);
             }
         }
         Ok(())
     }
 }
 
-fn handle_inner(inner: Inner, l: &dyn ChatListener) {
+fn handle_inner(inner: Inner, transcript: &std::sync::Mutex<Transcript>, l: &dyn ChatListener) {
     match inner {
         Inner::Text { id, body, ttl_secs } => {
             let body = Zeroizing::new(body);
-            l.on_message(ChatMessage {
+            let msg = ChatMessage {
                 id,
+                from_me: false,
                 body: body.to_string(),
                 ttl_secs,
-            });
+            };
+            transcript.lock().unwrap().push(id, false, body, ttl_secs);
+            l.on_message(msg);
         }
         Inner::ScreenCaptured => l.on_peer(PeerEvent::ScreenCaptured),
         Inner::Chaff | Inner::Ready | Inner::Ext { .. } => {}

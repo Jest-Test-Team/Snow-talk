@@ -16,6 +16,7 @@ mod pacer;
 mod pin;
 #[cfg(feature = "tor")]
 mod tor;
+mod transcript;
 
 pub use api::*;
 

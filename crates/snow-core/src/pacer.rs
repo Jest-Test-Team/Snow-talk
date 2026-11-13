@@ -20,15 +20,25 @@ pub const MIN_CHAFF_MS: u32 = 250;
 pub const MIN_GAP_MS: u64 = 500;
 const MAX_JITTER_MS: u64 = 300;
 
-pub struct Pending {
+/// Something real to send.
+pub enum Item {
+    Text {
+        id: u64,
+        body: Zeroizing<String>,
+        ttl_secs: u32,
+    },
+    /// An encrypted control message (e.g. "screen captured"). It goes through
+    /// the pacer too, so it can't be told apart from text or chaff by timing.
+    Control(snow_proto::Inner),
+}
+
+struct Pending {
     due: Instant,
-    pub id: u64,
-    pub body: Zeroizing<String>,
-    pub ttl_secs: u32,
+    item: Item,
 }
 
 pub enum Out {
-    Text(Pending),
+    Send(Item),
     Chaff,
 }
 
@@ -57,15 +67,10 @@ impl Pacer {
         }
     }
 
-    pub fn push(&mut self, id: u64, body: Zeroizing<String>, ttl_secs: u32) {
+    pub fn push(&mut self, item: Item) {
         let jitter = rand::thread_rng().gen_range(0..=MAX_JITTER_MS);
         let due = Instant::now() + Duration::from_millis(jitter);
-        self.queue.push_back(Pending {
-            due,
-            id,
-            body,
-            ttl_secs,
-        });
+        self.queue.push_back(Pending { due, item });
     }
 
     fn pop_due(&mut self) -> Option<Pending> {
@@ -84,7 +89,7 @@ impl Pacer {
             true => loop {
                 self.interval.as_mut().expect("checked").tick().await;
                 if let Some(p) = self.pop_due() {
-                    return Out::Text(p);
+                    return Out::Send(p.item);
                 }
                 if cover {
                     return Out::Chaff;
@@ -100,7 +105,7 @@ impl Pacer {
                 }
                 if let Some(p) = self.pop_due() {
                     self.last = Some(Instant::now());
-                    return Out::Text(p);
+                    return Out::Send(p.item);
                 }
             },
         }
@@ -111,17 +116,30 @@ impl Pacer {
 mod tests {
     use super::*;
 
+    fn text(id: u64) -> Item {
+        Item::Text {
+            id,
+            body: Zeroizing::new("x".into()),
+            ttl_secs: 0,
+        }
+    }
+
+    fn id(o: Out) -> u64 {
+        match o {
+            Out::Send(Item::Text { id, .. }) => id,
+            Out::Send(Item::Control(_)) => u64::MAX,
+            Out::Chaff => 0,
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn constant_rate_with_chaff_fills_gaps() {
         let mut p = Pacer::new(Some(250));
-        p.push(1, Zeroizing::new("hi".into()), 0);
+        p.push(text(1));
         let mut kinds = Vec::new();
         let start = Instant::now();
         for _ in 0..5 {
-            kinds.push(match p.next(true).await {
-                Out::Text(t) => t.id,
-                Out::Chaff => 0,
-            });
+            kinds.push(id(p.next(true).await));
         }
         // The first tick fires immediately, before the jitter has elapsed.
         assert_eq!(kinds.iter().filter(|k| **k == 1).count(), 1);
@@ -142,12 +160,12 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn chaff_off_spaces_bursts() {
         let mut p = Pacer::new(Some(0));
-        for i in 0..5 {
-            p.push(i, Zeroizing::new("x".into()), 0);
+        for i in 1..=5 {
+            p.push(text(i));
         }
         let start = Instant::now();
-        for _ in 0..5 {
-            assert!(matches!(p.next(false).await, Out::Text(_)));
+        for i in 1..=5 {
+            assert_eq!(id(p.next(false).await), i);
         }
         assert!(start.elapsed() >= Duration::from_millis(4 * MIN_GAP_MS));
     }
@@ -155,8 +173,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn no_cover_means_only_real_messages() {
         let mut p = Pacer::new(Some(100));
-        p.push(7, Zeroizing::new("x".into()), 0);
-        assert!(matches!(p.next(false).await, Out::Text(t) if t.id == 7));
+        p.push(text(7));
+        assert_eq!(id(p.next(false).await), 7);
         let r = tokio::time::timeout(Duration::from_secs(5), p.next(false)).await;
         assert!(r.is_err(), "no chaff while cover is off");
     }
@@ -165,8 +183,8 @@ mod tests {
     async fn chaff_off_sends_after_jitter_only() {
         let mut p = Pacer::new(Some(0));
         let t0 = Instant::now();
-        p.push(3, Zeroizing::new("x".into()), 0);
-        assert!(matches!(p.next(true).await, Out::Text(t) if t.id == 3));
+        p.push(Item::Control(snow_proto::Inner::ScreenCaptured));
+        assert_eq!(id(p.next(true).await), u64::MAX);
         assert!(t0.elapsed() <= Duration::from_millis(MAX_JITTER_MS));
     }
 }

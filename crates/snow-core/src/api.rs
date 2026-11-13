@@ -1,7 +1,9 @@
 use crate::engine::{self, Cmd};
+use crate::transcript::Transcript;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use zeroize::Zeroizing;
 
 /// Client configuration.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -80,7 +82,9 @@ pub enum PeerEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct ChatMessage {
+    /// Unique per side: `(id, from_me)` identifies a message.
     pub id: u64,
+    pub from_me: bool,
     pub body: String,
     pub ttl_secs: u32,
 }
@@ -101,6 +105,8 @@ pub trait ChatListener: Send + Sync {
     fn on_sas(&self, emoji: Vec<String>);
     fn on_message(&self, message: ChatMessage);
     fn on_peer(&self, event: PeerEvent);
+    /// A burn-after-reading timer expired: remove this message from the screen.
+    fn on_burn(&self, id: u64, from_me: bool);
 }
 
 /// One chat client. A new chat calls [`SnowClient::start_match`] again; every
@@ -113,6 +119,9 @@ pub struct SnowClient {
     cmd: Mutex<Option<mpsc::UnboundedSender<Cmd>>>,
     next_id: AtomicU64,
     shared: engine::Shared,
+    /// The current chat's transcript; replaced on every `start_match`, so an old
+    /// chat that ends late can't wipe the new one's.
+    transcript: Mutex<Arc<Mutex<Transcript>>>,
 }
 
 #[uniffi::export]
@@ -131,6 +140,7 @@ impl SnowClient {
             cmd: Mutex::new(None),
             next_id: AtomicU64::new(1),
             shared: engine::Shared::default(),
+            transcript: Mutex::default(),
         })
     }
 
@@ -140,26 +150,51 @@ impl SnowClient {
         if let Some(old) = self.cmd.lock().unwrap().replace(tx) {
             let _ = old.send(Cmd::Wipe);
         }
+        let transcript = Arc::new(Mutex::new(Transcript::default()));
+        *self.transcript.lock().unwrap() = transcript.clone();
+        let shared = engine::Shared {
+            transcript,
+            ..self.shared.clone()
+        };
         self.rt.spawn(engine::run(
             self.cfg.clone(),
             rx,
             self.listener.clone(),
-            self.shared.clone(),
+            shared,
         ));
     }
 
-    /// Queue a text message. Returns its local id.
+    /// Queue a text message. Returns its local id. `ttl_secs > 0` burns it on
+    /// both sides that many seconds after it is sent / received.
     pub fn send_text(&self, body: String, ttl_secs: u32) -> Result<u64, CoreError> {
+        let body = Zeroizing::new(body);
         if body.len() > snow_proto::MAX_TEXT_LEN {
             return Err(CoreError::TooLong);
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.command(Cmd::Send {
             id,
-            body: body.into(),
+            body: body.clone(),
             ttl_secs,
         })?;
+        let t = self.transcript.lock().unwrap().clone();
+        t.lock().unwrap().push(id, true, body, ttl_secs);
         Ok(id)
+    }
+
+    /// The current chat's messages, oldest first. The UI should render from
+    /// this and is free to drop its own copy whenever the app leaves the screen
+    /// (background, low memory, decoy), then call this again to redraw.
+    pub fn transcript(&self) -> Vec<ChatMessage> {
+        let t = self.transcript.lock().unwrap().clone();
+        let snapshot = t.lock().unwrap().snapshot();
+        snapshot
+    }
+
+    /// Tell the peer we took a screenshot or started recording the screen
+    /// (iOS `userDidTakeScreenshotNotification` / `UIScreen.capturedDidChange`).
+    pub fn notify_screen_captured(&self) {
+        let _ = self.command(Cmd::Control(snow_proto::Inner::ScreenCaptured));
     }
 
     /// Tell the peer we left, then end the chat.
