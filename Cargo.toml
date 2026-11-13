@@ -4,6 +4,7 @@ members = [
     "crates/snow-proto",
     "crates/snow-crypto",
     "crates/snow-pow",
+    "crates/snow-psi",
     "crates/snow-core",
     "crates/snow-cli",
 ]
