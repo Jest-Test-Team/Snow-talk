@@ -100,3 +100,31 @@ Options: (a) accept it as the cost of strong cover traffic; (b) chaff period > 1
 - **Server-side enforcement**, since the client is open source: per-slot token-bucket cap in the ChatRoom (free: burst 20, 2/s; paranoid: burst 40, 5/s). Over-cap frames are dropped with `Error(RateLimited)` (non-fatal; Olm tolerates gaps). A modified free client can still run slow (≤ 2/s) chaff and keep its room awake — the cost is bounded per room, so this is accepted.
 - E2E: the `chaff` (granted), `free` (0 idle frames, 12-message burst never limited) and `flood` (83/100 dropped, chat survives) scenarios pass; production policy denies the request.
 - Privacy note: the matchmaker learns one bit ("this user asked for/holds the perk"). In Phase 10 it will come from an unlinkable blind token.
+
+## Phase 6 — Device protection (Rust part done 2026-11-13; native part blocked on Xcode / Android SDK)
+
+**Plan vs. done**
+- ✅ **Burn after reading**: every message carries a TTL; each side runs its own timer (sender from when it's queued, receiver from arrival). On expiry the message is removed from the Rust store, zeroized, and the UI gets `on_burn(id, from_me)`. E2E `burn`: a 2 s message disappears on both sides after 2.00 s.
+- ✅ **RAM hygiene (Rust side)**: plaintext lives in a per-chat `Transcript` of `Zeroizing<String>`s, wiped when the chat ends. Each `start_match` gets a new transcript, so an old chat that ends late can't clear the new one.
+- ✅ **Screenshot notice**: `notify_screen_captured()` → encrypted `Inner::ScreenCaptured`, sent through the pacer so its timing looks like any other frame → the peer gets `on_peer(ScreenCaptured)`. Verified in E2E.
+- ⏳ **Native, blocked on tooling**: Android `FLAG_SECURE` + `onTrimMemory`; iOS secure-layer rendering, `userDidTakeScreenshotNotification` / `capturedDidChange` → `notify_screen_captured()`, blurred app-switcher snapshot; decoy calculator UI.
+
+**Deviations**
+- The plan had `snow_core::wipe_ui_cache()`. Instead, Rust is the source of truth: the UI renders from `transcript()` and drops its own list on background, low memory or the decoy screen, then fetches it again. A `wipe_ui_cache()` in Rust couldn't reach Swift/Kotlin memory anyway. Swift/Kotlin strings still can't be zeroized (best-effort, as the plan says).
+- While reconnecting, burn timers fire late, but `transcript()` already hides expired messages.
+
+## Phase 7 — Interest matching & ephemeral profiles (2026-11-13)
+
+**Plan vs. done**
+- ✅ **Tag buckets**: `snow_psi::bucket = SHA-256(domain ‖ week ‖ normalize(tag))[0] mod 64`, salted weekly (epoch = week number). The matchmaker only sees the bucket of the *primary* (first) tag. Normalization: NFKC, lowercase, strip `#`/`＃`, collapse spaces, ≤ 32 chars (so `ＣＡＴＳ`, `#cats` and `cats` are the same tag).
+- ✅ **In-session PSI**: ristretto255 DH-PSI (`snow-psi`) with two rounds of exactly 16 points. Both sets are padded with random points, so each side learns only the intersection, not the peer's tag count. The rounds travel as `Inner::PsiRound1/2` inside Olm and through the pacer. A peer with no tags still answers with padding, so the run always completes. Tests: intersection, disjoint/empty sets, fixed size, fresh secrets per run, malformed or out-of-order input, bucket uniformity.
+- ✅ **Auto re-queue**: with tags and `require_common_tag` (default true), an empty intersection ends the chat with `EndReason::NoCommonTags` and sends `Leave`. E2E `disjoint` passes.
+- ✅ **Ephemeral profile**: nickname / MBTI / mood / `adult_ok`, sent once per chat over E2EE (`Inner::Profile`), ≤ 64 bytes per field (checked on both encode and decode), never stored.
+- ✅ **Adult gate**: the `adult_tags` cargo feature (Android/sideload only). Without it, adult tags are never put in the PSI and `adult_ok` is forced false on send *and* receive. Adult tags use their own namespace (`18+:`), so they only match each other. CI tests both builds.
+- ✅ E2E `tags`: A = {cats, jazz, hiking}, B = {Cats, chess, #Hiking} → both privately get [cats, hiking]; profiles arrive; chat continues.
+
+**Deviations / limits to keep in mind**
+- Matching uses only the primary tag's bucket, so people who share only a secondary tag won't meet. A fix would be multi-bucket queueing (join several matchmaker shards at once); deferred until there's real queue data.
+- PSI limits (written in the crate docs): a dishonest peer can probe up to 16 chosen tags per chat, and can lie about the result.
+- Age self-declaration UI for adult tags belongs to the native app (Phase 3/6).
+- Users near a week boundary may hash to different buckets for a moment (negligible).
