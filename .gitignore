@@ -22,3 +22,4 @@ apps/android/app/src/main/java/uniffi
 *.keystore
 *.p12
 *.mobileprovision
+server/.secrets.prod*
