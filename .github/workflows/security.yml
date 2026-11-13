@@ -1,0 +1,186 @@
+# Security pre-checks: secrets, dependency vulnerabilities, SAST, SBOM.
+# Runs on its own (main, PRs, weekly) and as the gate in front of native.yml.
+# Third-party actions are pinned by commit SHA; scanners by exact version.
+name: security
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_call:
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  TRIVY_IMAGE: "aquasec/trivy:0.76.2"
+  SEMGREP_IMAGE: "semgrep/semgrep:1.185.0"
+  ZIZMOR_VERSION: "1.32.0"
+
+jobs:
+  secrets:
+    name: Secret scan (gitleaks, full history)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (checksum-verified)
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          tgz="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLO "$base/$tgz"
+          curl -fsSLO "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " $tgz\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum -c -
+          tar xzf "$tgz" gitleaks
+      - name: Scan
+        run: ./gitleaks git . --redact --no-banner --exit-code 1 --report-format sarif --report-path gitleaks.sarif
+      - name: Upload SARIF
+        if: always() && hashFiles('gitleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+  dependencies:
+    name: Dependency vulnerabilities (cargo-deny, Trivy)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo-deny (workspace, all features)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          arguments: --all-features
+          command: check advisories bans sources
+      - name: cargo-deny (server)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: server/Cargo.toml
+          command: check advisories bans sources
+      - name: Trivy report (all severities → code scanning)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$TRIVY_IMAGE" fs \
+            --scanners vuln,secret --ignorefile .trivyignore \
+            --format sarif --output trivy.sarif .
+      - name: Upload SARIF
+        if: always() && hashFiles('trivy.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
+      - name: Trivy gate (HIGH / CRITICAL with a fix available)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$TRIVY_IMAGE" fs \
+            --scanners vuln,secret --ignorefile .trivyignore \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .
+
+  codeql:
+    name: SAST (CodeQL ${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [rust, actions]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: codeql-${{ matrix.language }}
+
+  semgrep:
+    name: SAST (Semgrep — Rust, Kotlin, Swift, shell)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan (report)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e SEMGREP_SEND_METRICS=off "$SEMGREP_IMAGE" \
+            semgrep scan --config p/default --config p/secrets --metrics off \
+            --exclude vendor --exclude target --sarif --output semgrep.sarif
+      - name: Upload SARIF
+        if: always() && hashFiles('semgrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+      - name: Gate (ERROR severity)
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src -e SEMGREP_SEND_METRICS=off "$SEMGREP_IMAGE" \
+            semgrep scan --config p/default --config p/secrets --metrics off \
+            --exclude vendor --exclude target --severity ERROR --error
+
+  workflows:
+    name: Workflow security (zizmor)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: pip install --quiet "zizmor==${ZIZMOR_VERSION}"
+      - name: Scan (report)
+        run: zizmor --offline --format sarif .github/workflows > zizmor.sarif || true
+      - name: Upload SARIF
+        if: always() && hashFiles('zizmor.sarif') != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+      - name: Gate (high severity)
+        run: zizmor --offline --min-severity high .github/workflows
+
+  sbom:
+    name: SBOM (source, SPDX + CycloneDX)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom-source.spdx.json
+          upload-artifact: false
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom-source.cdx.json
+          upload-artifact: false
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sbom-source
+          path: sbom-source.*.json

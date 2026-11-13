@@ -1,0 +1,204 @@
+# Native app builds, gated on the security pre-checks.
+#
+# * Android: release APK, signed with the keystore from secrets, or — if none is
+#   configured — a throwaway self-signed key (installs fine, but each build has a
+#   different signature, so updates need an uninstall first).
+# * iOS: unsigned .ipa (sideload with AltStore / Sideloadly, which re-sign it with
+#   your Apple ID) plus a Simulator build. Signed / TestFlight builds need an
+#   Apple Developer account and are not set up yet.
+# * Tag `v*`: everything is attached to a GitHub release with checksums and SBOMs.
+# * No build caches here: release artifacts must not come from a poisonable cache.
+#
+# Secrets (optional): ANDROID_KEYSTORE_B64, ANDROID_KEYSTORE_PASSWORD,
+# ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD.
+name: native
+on:
+  push:
+    branches: ["ci/**"]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "apps/**"
+      - "crates/**"
+      - "scripts/build-*.sh"
+      - ".github/workflows/native.yml"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: "27.2.12479018"
+  ANDROID_API: "35"
+  BUILD_TOOLS: "35.0.0"
+  GRADLE_VERSION: "8.11.1"
+  CARGO_NDK_VERSION: "4.1.2"
+
+jobs:
+  security:
+    uses: ./.github/workflows/security.yml
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+
+  android:
+    name: Android APK
+    needs: security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: "platform-tools platforms;android-${{ env.ANDROID_API }} build-tools;${{ env.BUILD_TOOLS }} ndk;${{ env.NDK_VERSION }}"
+          log-accepted-android-sdk-licenses: false
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          # Release artifacts are never built from a (poisonable) cache.
+          cache-disabled: true
+      - name: Install cargo-ndk
+        run: cargo install --locked "cargo-ndk@${CARGO_NDK_VERSION}"
+      - name: Build Rust core (arm64-v8a, armeabi-v7a, x86_64) + Kotlin bindings
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          ./scripts/build-android.sh
+      - name: Signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ks="$RUNNER_TEMP/release.jks"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$ks"
+            pw="$KEYSTORE_PASSWORD"; alias="$KEY_ALIAS"; kpw="${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          else
+            echo "::warning::ANDROID_KEYSTORE_B64 not set: signing with a throwaway self-signed key"
+            pw="$(openssl rand -hex 24)"; alias=snowtalk; kpw="$pw"
+            keytool -genkeypair -keystore "$ks" -storetype PKCS12 -storepass "$pw" \
+              -alias "$alias" -keyalg EC -groupname secp256r1 -validity 10000 \
+              -dname "CN=Snow-talk CI (ephemeral)"
+          fi
+          echo "::add-mask::$pw"
+          echo "::add-mask::$kpw"
+          {
+            echo "SNOW_KEYSTORE=$ks"
+            echo "SNOW_KEYSTORE_PASSWORD=$pw"
+            echo "SNOW_KEY_ALIAS=$alias"
+            echo "SNOW_KEY_PASSWORD=$kpw"
+          } >> "$GITHUB_ENV"
+      - name: Assemble release APK + dependency SBOM
+        working-directory: apps/android
+        run: |
+          export SNOW_VERSION_CODE="${GITHUB_RUN_NUMBER}"
+          gradle --no-daemon :app:assembleRelease :app:cyclonedxBom
+      - name: Verify signature and package
+        run: |
+          set -euo pipefail
+          apk=apps/android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$apk"
+          mkdir -p dist
+          cp "$apk" "dist/snow-talk-android-${GITHUB_SHA::8}.apk"
+          cp apps/android/app/build/reports/bom.json dist/sbom-android.cdx.json
+          (cd dist && sha256sum ./*.apk > SHA256SUMS-android.txt)
+          rm -f "$SNOW_KEYSTORE"
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.event_name != 'pull_request'
+        with:
+          subject-path: dist/*.apk
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android
+          path: dist/
+
+  ios:
+    name: iOS IPA (unsigned) + Simulator app
+    needs: security
+    runs-on: macos-15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build SnowCore.xcframework + Swift bindings
+        run: ./scripts/build-ios.sh
+      - name: Generate Xcode project
+        working-directory: apps/ios
+        run: xcodegen generate
+      - name: Archive for device (unsigned)
+        working-directory: apps/ios
+        run: |
+          xcodebuild archive -project SnowTalk.xcodeproj -scheme SnowTalk -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath build/SnowTalk.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}" | tail -n 40
+      - name: Build for Simulator
+        working-directory: apps/ios
+        run: |
+          xcodebuild build -project SnowTalk.xcodeproj -scheme SnowTalk -configuration Release \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath build/sim \
+            CODE_SIGNING_ALLOWED=NO | tail -n 40
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist work/Payload
+          cp -R apps/ios/build/SnowTalk.xcarchive/Products/Applications/SnowTalk.app work/Payload/
+          (cd work && zip -qry "../dist/snow-talk-ios-${GITHUB_SHA::8}-unsigned.ipa" Payload)
+          (cd apps/ios/build/sim/Build/Products/Release-iphonesimulator && \
+            zip -qry "$GITHUB_WORKSPACE/dist/snow-talk-ios-${GITHUB_SHA::8}-simulator.app.zip" SnowTalk.app)
+          (cd dist && shasum -a 256 ./*.ipa ./*.zip > SHA256SUMS-ios.txt)
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.event_name != 'pull_request'
+        with:
+          subject-path: dist/*.ipa
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios
+          path: dist/
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [android, ios]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --prerelease --generate-notes --verify-tag

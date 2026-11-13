@@ -1,0 +1,32 @@
+# XcodeGen spec (`xcodegen generate` → SnowTalk.xcodeproj, not committed).
+# Needs SnowCore.xcframework and SnowTalk/Generated/ from scripts/build-ios.sh.
+name: SnowTalk
+options:
+  bundleIdPrefix: app.snowtalk
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  SnowTalk:
+    type: application
+    platform: iOS
+    scheme: {}
+    sources:
+      - SnowTalk
+    dependencies:
+      - framework: SnowCore.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.snowtalk.ios
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Snow-talk
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        TARGETED_DEVICE_FAMILY: "1"
+        ENABLE_BITCODE: NO
