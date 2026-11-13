@@ -36,13 +36,11 @@ publish_config() {
   done
 }
 MASTER=$(sed -n 's/^TOKEN_MASTER="\(.*\)"$/\1/p' server/.dev.vars)
-for s in ${SCENARIOS:-basic reconnect rotate chaff free flood burn tags disjoint media safety goodchat report trusted extend grace}; do
+for s in ${SCENARIOS:-basic reconnect rotate chaff free flood burn tags disjoint media safety goodchat report trusted extend grace vip}; do
   echo "== scenario: $s"
-  ./target/debug/snow-cli pair-test --messages "${MESSAGES:-3}" --marker "$MARKER" --scenario "$s"
+  ./target/debug/snow-cli pair-test --messages "${MESSAGES:-3}" --marker "$MARKER" --scenario "$s" --iap-chain "$CFG"
 done
 if [[ -z "${SCENARIOS:-}" ]]; then
-echo "== scenario: vip"
-./target/debug/snow-cli pair-test --scenario vip --iap-chain "$CFG"
 echo "== scenario: config"
 publish_config 1 "$MASTER"
 ./target/debug/snow-cli pair-test --messages 1 --marker "$MARKER" --scenario config --config-key "$PUBKEY"

@@ -176,15 +176,15 @@ pub fn redemption_key(store: &str, transaction_id: &str) -> String {
 }
 
 fn valid_at(c: &Certificate, unix: u64) -> bool {
-    let v = &c.tbs_certificate.validity;
+    let v = &c.tbs_certificate().validity();
     let nb = v.not_before.to_unix_duration().as_secs();
     let na = v.not_after.to_unix_duration().as_secs();
     nb <= unix && unix <= na
 }
 
 fn has_ext(c: &Certificate, oid: &str) -> bool {
-    c.tbs_certificate
-        .extensions
+    c.tbs_certificate()
+        .extensions()
         .as_ref()
         .is_some_and(|exts| exts.iter().any(|e| e.extn_id.to_string() == oid))
 }
@@ -195,7 +195,7 @@ enum SpkiKey {
 }
 
 fn spki_key(c: &Certificate) -> Result<SpkiKey, IapError> {
-    let spki = &c.tbs_certificate.subject_public_key_info;
+    let spki = &c.tbs_certificate().subject_public_key_info();
     let curve = spki
         .algorithm
         .parameters
@@ -218,19 +218,19 @@ fn spki_key(c: &Certificate) -> Result<SpkiKey, IapError> {
 /// `cert` must be signed by `issuer`'s key (and name `issuer` as its issuer).
 fn verify_cert(cert: &Certificate, issuer: &Certificate) -> Result<(), IapError> {
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
-    if cert.tbs_certificate.issuer != issuer.tbs_certificate.subject {
+    if cert.tbs_certificate().issuer() != issuer.tbs_certificate().subject() {
         return Err(IapError::UntrustedChain);
     }
     let tbs = cert
-        .tbs_certificate
+        .tbs_certificate()
         .to_der()
         .map_err(|_| IapError::Malformed)?;
-    let digest = match cert.signature_algorithm.oid.to_string().as_str() {
+    let digest = match cert.signature_algorithm().oid.to_string().as_str() {
         OID_ECDSA_SHA256 => Sha256::digest(&tbs).to_vec(),
         OID_ECDSA_SHA384 => Sha384::digest(&tbs).to_vec(),
         _ => return Err(IapError::UntrustedChain),
     };
-    let sig = cert.signature.raw_bytes();
+    let sig = cert.signature().raw_bytes();
     let ok = match spki_key(issuer)? {
         SpkiKey::P256(k) => p256::ecdsa::Signature::from_der(sig)
             .is_ok_and(|s| k.verify_prehash(&digest, &s).is_ok()),

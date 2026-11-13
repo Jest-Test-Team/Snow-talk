@@ -22,9 +22,9 @@ getrandom = { version = "0.2", features = ["js"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 console_error_panic_hook = "0.1"
 # App Store signed-transaction (JWS) verification.
-x509-cert = { version = "0.2", default-features = false }
-p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
-p384 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+x509-cert = { version = "0.3", default-features = false }
+p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 base64 = "0.22"
 serde_json = "1"
 
@@ -34,7 +34,7 @@ e2e-test-root = []
 
 [dev-dependencies]
 rcgen = "0.14"
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
 
 [profile.release]
 lto = true
