@@ -3,6 +3,9 @@
 //! * `GET /pow`   (header `x-snow-bucket: <b>`)     → proof-of-work challenge (57 raw bytes)
 //! * `GET /match` (subprotocols `snowtalk.v1, b.<b>`) → WebSocket to the Matchmaker shard
 //! * `GET /room`  (subprotocols `snowtalk.v1, t.<ticket>`) → WebSocket to the ChatRoom
+//! * `GET /config`, `GET /catalog` → the offline-signed remote config and the
+//!   sponsor catalog, served verbatim from R2. The relay holds no signing key: it
+//!   can withhold a config but not forge one (see `snow-config`).
 //!
 //! Buckets and tickets travel in headers, never in the URL. URLs end up in edge
 //! analytics, and the two tickets of a room share the room ID, so a ticket in the
@@ -114,8 +117,24 @@ mod entry {
                 )?;
                 stub.fetch_with_request(fwd).await
             }
+            (Method::Get, "/config") => public_object(&env, "config.bin").await,
+            (Method::Get, "/catalog") => public_object(&env, "catalog.json").await,
             _ => Response::error("not found", 404),
         }
+    }
+
+    /// Same bytes for everyone, so they may be cached anywhere.
+    async fn public_object(env: &Env, key: &str) -> Result<Response> {
+        let Some(obj) = env.bucket("PUBLIC")?.get(key).execute().await? else {
+            return Response::error("not found", 404);
+        };
+        let Some(body) = obj.body() else {
+            return Response::error("not found", 404);
+        };
+        let headers = Headers::new();
+        headers.set("content-type", "application/octet-stream")?;
+        headers.set("cache-control", "public, max-age=300")?;
+        Ok(Response::from_bytes(body.bytes().await?)?.with_headers(headers))
     }
 
     /// Read `<prefix><value>` from the offered subprotocols; `snowtalk.v1` must be offered.

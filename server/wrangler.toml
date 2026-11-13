@@ -27,6 +27,12 @@ class_name = "ChatRoom"
 name = "NULLIFIERS"
 class_name = "Nullifiers"
 
+# Public, non-secret objects: config.bin (signed offline, see snow-config) and
+# catalog.json (pinned by hash inside config.bin).
+[[r2_buckets]]
+binding = "PUBLIC"
+bucket_name = "snow-talk-public"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Matchmaker", "ChatRoom"]

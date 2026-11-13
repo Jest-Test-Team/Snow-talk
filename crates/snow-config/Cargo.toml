@@ -15,6 +15,16 @@ sha2 = { workspace = true }
 hex = "0.4.3"
 thiserror = { workspace = true }
 snow-psi = { path = "../snow-psi" }
+# Operator tool (offline signing). Not part of the app.
+snow-tokens = { path = "../snow-tokens", optional = true }
+getrandom = { version = "0.2", optional = true }
 
 [dev-dependencies]
 rand = { workspace = true }
+
+[features]
+tool = ["dep:snow-tokens", "dep:getrandom"]
+
+[[bin]]
+name = "snow-config"
+required-features = ["tool"]
