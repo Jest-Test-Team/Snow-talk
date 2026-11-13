@@ -3,6 +3,7 @@ package app.snowtalk.android
 import android.app.Application
 import android.content.Context
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
@@ -17,7 +18,10 @@ import uniffi.snow_core.MediaInfo
 import uniffi.snow_core.PeerEvent
 import uniffi.snow_core.SnowClient
 import uniffi.snow_core.SponsorCard
+import uniffi.snow_core.TagCategory
 import uniffi.snow_core.UserProfile
+import uniffi.snow_core.maxTags
+import uniffi.snow_core.tagCatalog
 
 /** Everything the screens render. Plaintext lives here only while visible. */
 data class UiState(
@@ -44,18 +48,28 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
 
-    // Only the relay address is remembered. Nickname and tags are re-entered
-    // each launch, so nothing about the user is written to disk.
+    // Only the relay address is remembered. Nickname and interests are picked
+    // again each launch, so nothing about the user is written to disk.
     var serverUrl by mutableStateOf(prefs.getString(KEY_SERVER, null) ?: BuildConfig.SNOW_SERVER_URL)
     var nickname by mutableStateOf("")
-    var tags by mutableStateOf("")
+    /** Picked interest keys (canonical, from [catalog]), in pick order. */
+    val selectedTags = mutableStateListOf<String>()
+    val catalog: List<TagCategory> by lazy { tagCatalog() }
+    val maxTagCount: Int = maxTags().toInt()
+
+    /** Pick or unpick a tag; returns false if the limit is reached. */
+    fun toggleTag(key: String): Boolean {
+        if (selectedTags.remove(key)) return true
+        if (selectedTags.size >= maxTagCount) return false
+        selectedTags.add(key)
+        return true
+    }
 
     @Volatile private var client: SnowClient? = null
     private var clientKey: List<String>? = null
     @Volatile private var visible = true
 
-    private fun parsedTags(): List<String> =
-        tags.split(',', '，', '、', ' ').map { it.trim() }.filter { it.isNotEmpty() }.take(16)
+    private fun parsedTags(): List<String> = selectedTags.toList()
 
     /** A client is bound to its config; rebuild it (keeping the wallet) when settings change. */
     private fun clientFor(): SnowClient {

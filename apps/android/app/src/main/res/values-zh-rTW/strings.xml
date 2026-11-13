@@ -2,8 +2,11 @@
 <resources>
     <string name="tagline">匿名、端對端加密地和陌生人聊天。什麼都不保存。</string>
     <string name="nickname">暱稱（選填）</string>
-    <string name="tags">興趣標籤（選填）</string>
-    <string name="tags_hint">用逗號分隔。配對後只會私下比對共同的標籤。</string>
+    <string name="tags">興趣標籤</string>
+    <string name="tags_hint">選填。配對後只會私下揭露你們共同的興趣。</string>
+    <string name="pick_tags">選擇興趣（%1$d/%2$d）</string>
+    <string name="tags_count">已選 %1$d／%2$d 個</string>
+    <string name="done">完成</string>
     <string name="advanced">伺服器設定</string>
     <string name="server">中繼伺服器網址</string>
     <string name="start">開始配對</string>

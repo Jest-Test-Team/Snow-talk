@@ -8,6 +8,7 @@
 uniffi::setup_scaffolding!();
 
 mod api;
+mod catalog;
 mod dns;
 mod engine;
 mod http;
@@ -25,6 +26,7 @@ mod transcript;
 mod wallet;
 
 pub use api::*;
+pub use catalog::*;
 
 /// Library version, exposed to the native shells as a smoke test.
 #[uniffi::export]

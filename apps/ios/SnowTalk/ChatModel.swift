@@ -15,22 +15,36 @@ final class ChatModel: ObservableObject, ChatListener, @unchecked Sendable {
     @Published var goodTokens: UInt32 = 0
     @Published var badServer = false
 
-    // Only the relay address is remembered; nickname and tags are not stored.
+    // Only the relay address is remembered; nickname and interests are not stored.
     @Published var serverUrl = UserDefaults.standard.string(forKey: "server_url")
         ?? (Bundle.main.object(forInfoDictionaryKey: "SnowServerURL") as? String ?? "")
     @Published var nickname = ""
-    @Published var tags = ""
+    /// Picked interest keys (canonical, from `catalog`), in pick order.
+    @Published var selectedTags: [String] = []
+    let catalog: [TagCategory] = tagCatalog()
+    let maxTagCount = Int(maxTags())
+
+    /// Pick or unpick a tag; returns false if the limit is reached.
+    @discardableResult
+    func toggleTag(_ key: String) -> Bool {
+        if let i = selectedTags.firstIndex(of: key) { selectedTags.remove(at: i); return true }
+        guard selectedTags.count < maxTagCount else { return false }
+        selectedTags.append(key)
+        return true
+    }
+
+    func label(_ key: String) -> String {
+        for c in catalog { if let t = c.tags.first(where: { $0.key == key }) { return Self.zh ? t.zh : t.en } }
+        return key
+    }
+
+    static var zh: Bool { Locale.preferredLanguages.first?.hasPrefix("zh") ?? false }
 
     private var client: SnowClient?
     private var clientKey: [String] = []
     private var visible = true
 
-    private var parsedTags: [String] {
-        tags.split(whereSeparator: { ",，、 ".contains($0) })
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .prefix(16).map { String($0) }
-    }
+    private var parsedTags: [String] { selectedTags }
 
     private func clientFor() -> SnowClient {
         let nick = nickname.trimmingCharacters(in: .whitespaces)

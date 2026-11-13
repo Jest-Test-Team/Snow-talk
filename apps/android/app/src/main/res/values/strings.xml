@@ -3,8 +3,11 @@
     <string name="app_name">Snow-talk</string>
     <string name="tagline">Anonymous, end-to-end encrypted chats with strangers. Nothing is stored.</string>
     <string name="nickname">Nickname (optional)</string>
-    <string name="tags">Interests (optional)</string>
-    <string name="tags_hint">Comma-separated. Compared privately with your match.</string>
+    <string name="tags">Interests</string>
+    <string name="tags_hint">Optional. Only the ones you share with your match are revealed, privately.</string>
+    <string name="pick_tags">Pick interests (%1$d/%2$d)</string>
+    <string name="tags_count">%1$d of %2$d picked</string>
+    <string name="done">Done</string>
     <string name="advanced">Server settings</string>
     <string name="server">Relay server URL</string>
     <string name="start">Find someone</string>

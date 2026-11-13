@@ -1,7 +1,10 @@
 "Anonymous, end-to-end encrypted chats with strangers. Nothing is stored." = "匿名、端對端加密地和陌生人聊天。什麼都不保存。";
 "Nickname (optional)" = "暱稱（選填）";
-"Interests (optional)" = "興趣標籤（選填）";
-"Comma-separated. Compared privately with your match." = "用逗號分隔。配對後只會私下比對共同的標籤。";
+"Interests" = "興趣標籤";
+"Optional. Only the ones you share with your match are revealed, privately." = "選填。配對後只會私下揭露你們共同的興趣。";
+"Pick interests (%lld/%lld)" = "選擇興趣（%lld/%lld）";
+"%lld of %lld picked" = "已選 %lld／%lld 個";
+"Done" = "完成";
 "Server settings" = "伺服器設定";
 "Relay server URL" = "中繼伺服器網址";
 "Good-chat tokens: %u" = "好寶寶 token：%u";

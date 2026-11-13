@@ -1,3 +1,5 @@
+@file:OptIn(ExperimentalLayoutApi::class)
+
 package app.snowtalk.android
 
 import android.content.Intent
@@ -7,6 +9,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -51,6 +55,7 @@ import uniffi.snow_core.ChatState
 import uniffi.snow_core.EndReason
 import uniffi.snow_core.PeerEvent
 import uniffi.snow_core.SafetyLevel
+import java.util.Locale
 
 @Composable
 fun SnowApp(vm: ChatViewModel) {
@@ -75,6 +80,11 @@ fun SnowApp(vm: ChatViewModel) {
 @Composable
 private fun HomeScreen(vm: ChatViewModel, s: UiState) {
     var advanced by rememberSaveable { mutableStateOf(vm.serverUrl.isBlank()) }
+    var picking by rememberSaveable { mutableStateOf(false) }
+    if (picking) {
+        TagPicker(vm) { picking = false }
+        return
+    }
     Column(
         Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -90,14 +100,19 @@ private fun HomeScreen(vm: ChatViewModel, s: UiState) {
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
-        OutlinedTextField(
-            value = vm.tags,
-            onValueChange = { vm.tags = it.take(200) },
-            label = { Text(stringResource(R.string.tags)) },
-            supportingText = { Text(stringResource(R.string.tags_hint)) },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        Text(stringResource(R.string.tags), style = MaterialTheme.typography.titleSmall)
+        if (vm.selectedTags.isEmpty()) {
+            Text(stringResource(R.string.tags_hint), style = MaterialTheme.typography.bodySmall)
+        } else {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (key in vm.selectedTags) {
+                    FilterChip(selected = true, onClick = { vm.toggleTag(key) }, label = { Text(tagLabel(vm, key)) })
+                }
+            }
+        }
+        OutlinedButton(onClick = { picking = true }) {
+            Text(stringResource(R.string.pick_tags, vm.selectedTags.size, vm.maxTagCount))
+        }
         TextButton(onClick = { advanced = !advanced }) { Text(stringResource(R.string.advanced)) }
         if (advanced) {
             OutlinedTextField(
@@ -116,6 +131,54 @@ private fun HomeScreen(vm: ChatViewModel, s: UiState) {
         )
         Button(onClick = vm::start, modifier = Modifier.fillMaxWidth().height(52.dp)) {
             Text(stringResource(R.string.start))
+        }
+    }
+}
+
+private val zh: Boolean get() = Locale.getDefault().language == "zh"
+
+private fun tagLabel(vm: ChatViewModel, key: String): String =
+    vm.catalog.asSequence().flatMap { it.tags }.firstOrNull { it.key == key }
+        ?.let { if (zh) it.zh else it.en } ?: key
+
+/** Tinder-style interest picker: tap chips, up to [ChatViewModel.maxTagCount]. */
+@Composable
+private fun TagPicker(vm: ChatViewModel, onDone: () -> Unit) {
+    var full by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(stringResource(R.string.tags), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(
+                    stringResource(R.string.tags_count, vm.selectedTags.size, vm.maxTagCount),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (full) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Button(onClick = onDone) { Text(stringResource(R.string.done)) }
+        }
+        LazyColumn(
+            Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            items(vm.catalog, key = { it.zh }) { cat ->
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(if (zh) cat.zh else cat.en, style = MaterialTheme.typography.titleSmall)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (t in cat.tags) {
+                            FilterChip(
+                                selected = t.key in vm.selectedTags,
+                                onClick = { full = !vm.toggleTag(t.key) },
+                                label = { Text(if (zh) t.zh else t.en) },
+                            )
+                        }
+                    }
+                }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
         }
     }
 }

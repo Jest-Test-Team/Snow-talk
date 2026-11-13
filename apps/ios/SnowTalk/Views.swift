@@ -21,6 +21,7 @@ struct RootView: View {
 struct HomeView: View {
     @ObservedObject var model: ChatModel
     @State private var advanced = false
+    @State private var picking = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -28,8 +29,19 @@ struct HomeView: View {
             Text("Anonymous, end-to-end encrypted chats with strangers. Nothing is stored.")
                 .font(.subheadline).foregroundStyle(.secondary)
             TextField("Nickname (optional)", text: $model.nickname).textFieldStyle(.roundedBorder)
-            TextField("Interests (optional)", text: $model.tags).textFieldStyle(.roundedBorder)
-            Text("Comma-separated. Compared privately with your match.").font(.caption).foregroundStyle(.secondary)
+            Text("Interests").font(.headline)
+            if model.selectedTags.isEmpty {
+                Text("Optional. Only the ones you share with your match are revealed, privately.")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], alignment: .leading, spacing: 6) {
+                    ForEach(model.selectedTags, id: \.self) { key in
+                        Chip(label: model.label(key), selected: true) { model.toggleTag(key) }
+                    }
+                }
+            }
+            Button("Pick interests (\(model.selectedTags.count)/\(model.maxTagCount))") { picking = true }
+                .buttonStyle(.bordered)
             Button("Server settings") { advanced.toggle() }.font(.callout)
             if advanced || model.serverUrl.isEmpty {
                 TextField("Relay server URL", text: $model.serverUrl)
@@ -44,6 +56,60 @@ struct HomeView: View {
             .buttonStyle(.borderedProminent)
         }
         .padding(24)
+        .sheet(isPresented: $picking) { TagPickerView(model: model) }
+    }
+}
+
+struct Chip: View {
+    let label: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label).font(.subheadline).lineLimit(1)
+                .padding(.horizontal, 12).padding(.vertical, 7)
+                .frame(maxWidth: .infinity)
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .background(selected ? Color.accentColor : Color.secondary.opacity(0.15), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Tinder-style interest picker: tap chips, up to `maxTagCount`.
+struct TagPickerView: View {
+    @ObservedObject var model: ChatModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var full = false
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("\(model.selectedTags.count) of \(model.maxTagCount) picked")
+                        .font(.caption).foregroundColor(full ? .red : .secondary)
+                    ForEach(model.catalog, id: \.zh) { cat in
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(ChatModel.zh ? cat.zh : cat.en).font(.headline)
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
+                                ForEach(cat.tags, id: \.key) { t in
+                                    Chip(label: ChatModel.zh ? t.zh : t.en,
+                                         selected: model.selectedTags.contains(t.key)) {
+                                        full = !model.toggleTag(t.key)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding()
+            }
+            .navigationTitle(Text("Interests"))
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
     }
 }
 
