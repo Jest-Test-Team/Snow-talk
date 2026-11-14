@@ -37,10 +37,8 @@ struct HomeView: View {
                 Text("Optional. Only the ones you share with your match are revealed, privately.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], alignment: .leading, spacing: 6) {
-                    ForEach(model.selectedTags, id: \.self) { key in
-                        Chip(label: model.label(key), selected: true) { model.toggleTag(key) }
-                    }
+                Flow(items: model.selectedTags) { key in
+                    Chip(label: model.label(key), selected: true) { model.toggleTag(key) }
                 }
             }
             Button("Pick interests (\(model.selectedTags.count)/\(model.maxTagCount))") { picking = true }
@@ -70,9 +68,8 @@ struct Chip: View {
 
     var body: some View {
         Button(action: action) {
-            Text(label).font(.subheadline).lineLimit(1)
+            Text(label).font(.subheadline).lineLimit(1).fixedSize()
                 .padding(.horizontal, 12).padding(.vertical, 7)
-                .frame(maxWidth: .infinity)
                 .foregroundStyle(selected ? Color.white : Color.primary)
                 .background(selected ? Color.accentColor : Color.secondary.opacity(0.15), in: Capsule())
         }
@@ -94,11 +91,10 @@ struct TagPickerView: View {
                     .foregroundColor(cat.adult ? .red : .primary)
                 if cat.singleChoice { Text("Pick one").font(.caption2).foregroundStyle(.secondary) }
             }
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
-                ForEach(cat.tags, id: \.key) { t in
-                    Chip(label: ChatModel.zh ? t.zh : t.en, selected: model.selectedTags.contains(t.key)) {
-                        full = !model.toggleTag(t.key)
-                    }
+            Flow(items: cat.tags.map(\.key)) { key in
+                let t = cat.tags.first { $0.key == key }!
+                Chip(label: ChatModel.zh ? t.zh : t.en, selected: model.selectedTags.contains(key)) {
+                    full = !model.toggleTag(key)
                 }
             }
         }
