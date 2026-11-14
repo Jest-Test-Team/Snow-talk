@@ -46,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -175,7 +176,7 @@ private fun TagPicker(vm: ChatViewModel, onDone: () -> Unit) {
             Button(onClick = onDone) { Text(stringResource(R.string.done)) }
         }
         LazyColumn(
-            Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
+            Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp).testTag("tagList"),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             items(vm.catalog, key = { it.zh }) { cat -> CategoryChips(vm, cat) { full = it } }

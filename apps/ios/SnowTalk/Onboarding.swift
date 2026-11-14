@@ -63,7 +63,8 @@ struct OnboardingView: View {
                 Button {
                     if last { onDone() } else { withAnimation { page += 1 } }
                 } label: {
-                    Text(last ? "Start chatting" : "Next")
+                    // A ternary of literals is a String (shown verbatim); keep them localized.
+                    Text(last ? LocalizedStringKey("Start chatting") : LocalizedStringKey("Next"))
                         .font(.headline)
                         .frame(maxWidth: .infinity, minHeight: 54)
                         .foregroundColor(slides[page].colors[0])

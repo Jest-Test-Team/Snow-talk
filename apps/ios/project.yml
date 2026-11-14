@@ -15,7 +15,9 @@ targets:
   SnowTalk:
     type: application
     platform: iOS
-    scheme: {}
+    scheme:
+      testTargets:
+        - SnowTalkUITests
     sources:
       - SnowTalk
     dependencies:
@@ -33,3 +35,15 @@ targets:
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Connect to a Snow-talk relay on your local network (development)."
         TARGETED_DEVICE_FAMILY: "1"
         ENABLE_BITCODE: NO
+  SnowTalkUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - SnowTalkUITests
+    dependencies:
+      - target: SnowTalk
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.snowtalk.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: SnowTalk

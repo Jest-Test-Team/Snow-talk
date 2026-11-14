@@ -130,6 +130,30 @@ jobs:
         with:
           name: android
           path: dist/
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: On an emulator — walkthrough/picker UI test + pairing through the production relay
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          SNOW_SCREENSHOTS: "1"
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          working-directory: apps/android
+          script: gradle --no-daemon :app:connectedDebugAndroidTest
+      - name: Upload test screenshots and report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-tests
+          path: |
+            apps/android/app/build/outputs/connected_android_test_additional_output/
+            apps/android/app/build/reports/androidTests/
+          if-no-files-found: warn
 
   ios:
     name: iOS IPA (unsigned) + Simulator app
@@ -176,6 +200,27 @@ jobs:
           (cd apps/ios/build/sim/Build/Products/Release-iphonesimulator && \
             zip -qry "$GITHUB_WORKSPACE/dist/snow-talk-ios-${GITHUB_SHA::8}-simulator.app.zip" SnowTalk.app)
           (cd dist && shasum -a 256 ./*.ipa ./*.zip > SHA256SUMS-ios.txt)
+      - name: UI test on a simulator (walkthrough + picker, with screenshots)
+        working-directory: apps/ios
+        run: |
+          set -euo pipefail
+          SIM=$(xcrun simctl list devices available -j | python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for k,v in sorted(d.items(), reverse=True) if 'iOS' in k for x in v if x['name'].startswith('iPhone')))")
+          xcodebuild test -project SnowTalk.xcodeproj -scheme SnowTalk -destination "id=$SIM" \
+            -resultBundlePath build/UITests.xcresult CODE_SIGNING_ALLOWED=NO | tail -n 30
+      - name: Export UI test screenshots
+        if: always()
+        working-directory: apps/ios
+        run: |
+          mkdir -p build/screenshots
+          [ -d build/UITests.xcresult ] && xcrun xcresulttool export attachments \
+            --path build/UITests.xcresult --output-path build/screenshots || true
+      - name: Upload UI test screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-tests
+          path: apps/ios/build/screenshots/
+          if-no-files-found: warn
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: github.event_name != 'pull_request'
         with:
