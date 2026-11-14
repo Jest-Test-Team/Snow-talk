@@ -51,6 +51,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
     // Only the relay address is remembered. Nickname and interests are picked
     // again each launch, so nothing about the user is written to disk.
     var serverUrl by mutableStateOf(prefs.getString(KEY_SERVER, null) ?: BuildConfig.SNOW_SERVER_URL)
+    /** Tor mode through Orbot's local SOCKS5 proxy. */
+    var useTor by mutableStateOf(prefs.getBoolean(KEY_TOR, false))
     var nickname by mutableStateOf("")
     /** Picked interest keys (canonical, from [catalog]), in pick order. */
     val selectedTags = mutableStateListOf<String>()
@@ -73,7 +75,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
 
     /** A client is bound to its config; rebuild it (keeping the wallet) when settings change. */
     private fun clientFor(): SnowClient {
-        val key = listOf(serverUrl.trim(), nickname.trim(), parsedTags().joinToString("\u0000"))
+        val key = listOf(serverUrl.trim(), nickname.trim(), parsedTags().joinToString("\u0000"), useTor.toString())
         client?.let { if (key == clientKey) return it }
         val saved = client?.walletExport() ?: wallet.load()
         client?.close()
@@ -81,6 +83,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
             serverUrl = key[0],
             tags = parsedTags(),
             profile = nickname.trim().takeIf { it.isNotEmpty() }?.let { UserProfile(nickname = it) },
+            socksProxy = if (useTor) ORBOT_SOCKS else null,
         )
         val c = SnowClient(cfg, this)
         saved?.let { runCatching { c.walletImport(it) } }
@@ -95,7 +98,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
             _ui.update { it.copy(error = "server") }
             return
         }
-        prefs.edit().putString(KEY_SERVER, url).apply()
+        prefs.edit().putString(KEY_SERVER, url).putBoolean(KEY_TOR, useTor).apply()
         val c = clientFor()
         _ui.value = UiState(chat = ChatState.SolvingPow, goodTokens = c.goodTokens().toInt())
         c.startMatch()
@@ -172,6 +175,8 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
 
     private companion object {
         const val KEY_SERVER = "server_url"
+        const val KEY_TOR = "use_tor"
+        const val ORBOT_SOCKS = "127.0.0.1:9050"
         const val BURN_SECS = 10u
     }
 }

@@ -42,4 +42,6 @@
     <string name="end_reported">已檢舉，謝謝你讓這裡更安全。</string>
     <string name="end_error">發生錯誤：%1$s</string>
     <string name="error_server">請在「伺服器設定」填入中繼伺服器網址（http:// 或 https://）。</string>
+    <string name="tor">透過 Tor 連線（Orbot）</string>
+    <string name="tor_hint">需要先開啟 Orbot。速度較慢，但中繼伺服器看不到你的 IP。</string>
 </resources>

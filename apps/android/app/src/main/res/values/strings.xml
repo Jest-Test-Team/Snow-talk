@@ -43,4 +43,6 @@
     <string name="end_reported">Reported. Thanks for keeping this place safe.</string>
     <string name="end_error">Something went wrong: %1$s</string>
     <string name="error_server">Set a relay server URL (http:// or https://) under Server settings.</string>
+    <string name="tor">Connect through Tor (Orbot)</string>
+    <string name="tor_hint">Needs the Orbot app running. Slower, but hides your IP address from the relay.</string>
 </resources>

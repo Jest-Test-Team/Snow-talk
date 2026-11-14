@@ -20,7 +20,7 @@ android {
         versionCode = (System.getenv("SNOW_VERSION_CODE") ?: "1").toInt()
         versionName = System.getenv("SNOW_VERSION_NAME") ?: "0.1.0"
         // Default relay; users can change it on the home screen.
-        buildConfigField("String", "SNOW_SERVER_URL", "\"${System.getenv("SNOW_SERVER_URL") ?: ""}\"")
+        buildConfigField("String", "SNOW_SERVER_URL", "\"${System.getenv("SNOW_SERVER_URL") ?: "https://snow-talk.pcleegood.workers.dev"}\"")
     }
 
     signingConfigs {

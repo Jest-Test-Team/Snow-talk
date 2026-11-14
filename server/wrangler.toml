@@ -1,6 +1,10 @@
 name = "snow-talk"
 main = "build/worker/shim.mjs"
 compatibility_date = "2026-10-01"
+# Public relay URL: https://snow-talk.pcleegood.workers.dev (the apps' default).
+# No per-version preview URLs: every deployed version would be publicly reachable.
+workers_dev = true
+preview_urls = false
 
 [build]
 # SNOW_BUILD_ARGS is only set by scripts/e2e.sh (test-only cargo features).

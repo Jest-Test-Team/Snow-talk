@@ -33,6 +33,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -123,6 +124,13 @@ private fun HomeScreen(vm: ChatViewModel, s: UiState) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(stringResource(R.string.tor))
+                    Text(stringResource(R.string.tor_hint), style = MaterialTheme.typography.bodySmall)
+                }
+                Switch(checked = vm.useTor, onCheckedChange = { vm.useTor = it })
+            }
         }
         Spacer(Modifier.weight(1f))
         Text(

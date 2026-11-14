@@ -17,7 +17,7 @@ final class ChatModel: ObservableObject, ChatListener, @unchecked Sendable {
 
     // Only the relay address is remembered; nickname and interests are not stored.
     @Published var serverUrl = UserDefaults.standard.string(forKey: "server_url")
-        ?? (Bundle.main.object(forInfoDictionaryKey: "SnowServerURL") as? String ?? "")
+        ?? "https://snow-talk.pcleegood.workers.dev"
     @Published var nickname = ""
     /// Picked interest keys (canonical, from `catalog`), in pick order.
     @Published var selectedTags: [String] = []
