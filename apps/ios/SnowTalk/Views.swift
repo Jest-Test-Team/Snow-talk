@@ -2,11 +2,12 @@ import SwiftUI
 
 struct RootView: View {
     @ObservedObject var model: ChatModel
+    let replayOnboarding: () -> Void
 
     var body: some View {
         Group {
             switch model.chat {
-            case nil: HomeView(model: model)
+            case nil: HomeView(model: model, replayOnboarding: replayOnboarding)
             case .ended(let reason): EndedView(model: model, reason: reason)
             case .chatting, .reconnecting: ChatView(model: model)
             case let other?: WaitingView(model: model, state: other)
@@ -20,6 +21,7 @@ struct RootView: View {
 
 struct HomeView: View {
     @ObservedObject var model: ChatModel
+    let replayOnboarding: () -> Void
     @State private var advanced = false
     @State private var picking = false
 
@@ -28,6 +30,7 @@ struct HomeView: View {
             Text("Snow-talk").font(.largeTitle.bold())
             Text("Anonymous, end-to-end encrypted chats with strangers. Nothing is stored.")
                 .font(.subheadline).foregroundStyle(.secondary)
+            Button("How does the privacy work?", action: replayOnboarding).font(.callout)
             TextField("Nickname (optional)", text: $model.nickname).textFieldStyle(.roundedBorder)
             Text("Interests").font(.headline)
             if model.selectedTags.isEmpty {

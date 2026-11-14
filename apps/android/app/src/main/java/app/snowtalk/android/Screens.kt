@@ -62,6 +62,10 @@ import java.util.Locale
 @Composable
 fun SnowApp(vm: ChatViewModel) {
     val s by vm.ui.collectAsStateWithLifecycle()
+    if (!vm.onboarded) {
+        Onboarding(onDone = vm::finishOnboarding)
+        return
+    }
     Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         when (val st = s.chat) {
             null -> HomeScreen(vm, s)
@@ -94,6 +98,7 @@ private fun HomeScreen(vm: ChatViewModel, s: UiState) {
         Spacer(Modifier.height(24.dp))
         Text("Snow-talk", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
         Text(stringResource(R.string.tagline), style = MaterialTheme.typography.bodyMedium)
+        TextButton(onClick = vm::replayOnboarding) { Text(stringResource(R.string.how_privacy)) }
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
             value = vm.nickname,

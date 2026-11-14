@@ -53,6 +53,19 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
     // Only the relay address is remembered. Nickname and interests are picked
     // again each launch, so nothing about the user is written to disk.
     var serverUrl by mutableStateOf(prefs.getString(KEY_SERVER, null) ?: BuildConfig.SNOW_SERVER_URL)
+    /** First launch: show the privacy walkthrough. (A flag, nothing about the user.) */
+    var onboarded by mutableStateOf(prefs.getBoolean(KEY_ONBOARDED, false))
+        private set
+
+    fun finishOnboarding() {
+        onboarded = true
+        prefs.edit().putBoolean(KEY_ONBOARDED, true).apply()
+    }
+
+    fun replayOnboarding() {
+        onboarded = false
+    }
+
     /** Tor mode through Orbot's local SOCKS5 proxy. */
     var useTor by mutableStateOf(prefs.getBoolean(KEY_TOR, false))
     var nickname by mutableStateOf("")
@@ -214,6 +227,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
     private companion object {
         const val KEY_SERVER = "server_url"
         const val KEY_TOR = "use_tor"
+        const val KEY_ONBOARDED = "onboarded"
         const val ORBOT_SOCKS = "127.0.0.1:9050"
         const val BURN_SECS = 10u
     }

@@ -54,4 +54,20 @@
     <string name="adult_warning">This section contains sexually explicit topics. Continue only if you are at least 18 years old (or the age of majority where you live) and want to see adult content.\n\nAdult picks are only compared with other users who chose them too, never shown to anyone else, and never stored. Strictly between consenting adults: any involvement of minors, non-consent or paid sex is forbidden and can be reported.</string>
     <string name="adult_confirm">I am 18 or older</string>
     <string name="adult_decline">Not now</string>
+    <string name="how_privacy">How does the privacy work?</string>
+    <string name="ob_skip">Skip</string>
+    <string name="ob_next">Next</string>
+    <string name="ob_start">Start chatting</string>
+    <string name="ob1_title">Welcome to Snow-talk</string>
+    <string name="ob1_body">Chat with strangers anonymously, with privacy built into the design.\nNo sign-up, no phone number, no email: there is no account to link to you.</string>
+    <string name="ob2_title">Only the two of you can read it</string>
+    <string name="ob2_body">Messages are encrypted on your phone and can only be opened on the other person\'s phone. Our server only passes along ciphertext it cannot read.\nThe 7 emoji in each chat let you both check that nobody is in the middle.</string>
+    <string name="ob3_title">Nothing is kept</string>
+    <string name="ob3_body">No accounts, no chat history, no trackers, no ad SDKs. When a chat ends its keys are destroyed.\nMessages can burn after reading, and screenshots of the chat are blocked.</string>
+    <string name="ob4_title">Interests, compared in private</string>
+    <string name="ob4_body">The server only sees a coarse group number. Your interests are compared in encrypted form between the two phones, so the other person only learns the ones you share, and nobody ever sees the rest.</string>
+    <string name="ob5_title">Safety without giving up privacy</string>
+    <string name="ob5_body">Scam warnings are worked out on your own phone. Reporting someone sends no conversation at all; it just stops them earning trust. Trust tokens are anonymous and can\'t be traced to you.</string>
+    <string name="ob6_title">How to use it</string>
+    <string name="ob6_body">1. Pick some interests (optional)\n2. Tap \"Find someone\"\n3. Chat, and leave or move on whenever you like\n\nNone of this costs you privacy: every pick, match and message stays unknown to the server. It never learns who you are or what you say.</string>
 </resources>
