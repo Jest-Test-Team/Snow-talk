@@ -56,6 +56,7 @@ import uniffi.snow_core.ChatState
 import uniffi.snow_core.EndReason
 import uniffi.snow_core.PeerEvent
 import uniffi.snow_core.SafetyLevel
+import uniffi.snow_core.TagCategory
 import java.util.Locale
 
 @Composable
@@ -146,7 +147,7 @@ private fun HomeScreen(vm: ChatViewModel, s: UiState) {
 private val zh: Boolean get() = Locale.getDefault().language == "zh"
 
 private fun tagLabel(vm: ChatViewModel, key: String): String =
-    vm.catalog.asSequence().flatMap { it.tags }.firstOrNull { it.key == key }
+    (vm.catalog + vm.adultCatalog).asSequence().flatMap { it.tags }.firstOrNull { it.key == key }
         ?.let { if (zh) it.zh else it.en } ?: key
 
 /** Tinder-style interest picker: tap chips, up to [ChatViewModel.maxTagCount]. */
@@ -172,22 +173,68 @@ private fun TagPicker(vm: ChatViewModel, onDone: () -> Unit) {
             Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            items(vm.catalog, key = { it.zh }) { cat ->
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(if (zh) cat.zh else cat.en, style = MaterialTheme.typography.titleSmall)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        for (t in cat.tags) {
-                            FilterChip(
-                                selected = t.key in vm.selectedTags,
-                                onClick = { full = !vm.toggleTag(t.key) },
-                                label = { Text(if (zh) t.zh else t.en) },
-                            )
-                        }
-                    }
+            items(vm.catalog, key = { it.zh }) { cat -> CategoryChips(vm, cat) { full = it } }
+            if (vm.adultAvailable) {
+                if (vm.adultConfirmed) {
+                    items(vm.adultCatalog, key = { it.zh }) { cat -> CategoryChips(vm, cat) { full = it } }
+                    item { TextButton(onClick = vm::revokeAdult) { Text(stringResource(R.string.adult_hide)) } }
+                } else {
+                    item { AdultGate { vm.adultConfirmed = true } }
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
+    }
+}
+
+@Composable
+private fun CategoryChips(vm: ChatViewModel, cat: TagCategory, onFull: (Boolean) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                if (zh) cat.zh else cat.en,
+                style = MaterialTheme.typography.titleSmall,
+                color = if (cat.adult) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            )
+            if (cat.singleChoice) {
+                Text(stringResource(R.string.pick_one), style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            for (t in cat.tags) {
+                FilterChip(
+                    selected = t.key in vm.selectedTags,
+                    onClick = { onFull(!vm.toggleTag(t.key)) },
+                    label = { Text(if (zh) t.zh else t.en) },
+                )
+            }
+        }
+    }
+}
+
+/** 18+ section: hidden behind an explicit age confirmation and content warning. */
+@Composable
+private fun AdultGate(onConfirm: () -> Unit) {
+    var asking by remember { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("🔞 " + stringResource(R.string.adult_title), fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.adult_teaser), style = MaterialTheme.typography.bodySmall)
+            OutlinedButton(onClick = { asking = true }) { Text(stringResource(R.string.adult_show)) }
+        }
+    }
+    if (asking) {
+        AlertDialog(
+            onDismissRequest = { asking = false },
+            title = { Text("🔞 " + stringResource(R.string.adult_warning_title)) },
+            text = { Text(stringResource(R.string.adult_warning)) },
+            confirmButton = {
+                TextButton(onClick = { asking = false; onConfirm() }) { Text(stringResource(R.string.adult_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { asking = false }) { Text(stringResource(R.string.adult_decline)) }
+            },
+        )
     }
 }
 

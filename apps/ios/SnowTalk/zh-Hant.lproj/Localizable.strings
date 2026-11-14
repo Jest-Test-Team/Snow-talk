@@ -41,3 +41,12 @@
 "Reported. Thanks for keeping this place safe." = "已檢舉，謝謝你讓這裡更安全。";
 "Something went wrong: %@" = "發生錯誤：%@";
 "Set a relay server URL (http:// or https://) under Server settings." = "請在「伺服器設定」填入中繼伺服器網址（http:// 或 https://）。";
+"Pick one" = "單選";
+"🔞 Adult interests (18+)" = "🔞 成人興趣（18+）";
+"Explicit topics, kinks and orientations. Only matched with other adults who picked the same ones." = "包含露骨話題、性癖好與性取向。只會和同樣選擇的成年人私下比對。";
+"Show 18+ interests" = "顯示 18+ 興趣";
+"Hide 18+ interests" = "隱藏 18+ 興趣";
+"🔞 18+ content warning" = "🔞 18 歲以上內容警告";
+"I am 18 or older" = "我已年滿 18 歲";
+"Not now" = "先不要";
+"This section contains sexually explicit topics. Continue only if you are at least 18 years old (or the age of majority where you live) and want to see adult content. Adult picks are only compared with other users who chose them too, never shown to anyone else, and never stored. Strictly between consenting adults: any involvement of minors, non-consent or paid sex is forbidden and can be reported." = "以下內容包含性相關的露骨話題。請確認你已年滿 18 歲（或你所在地區的成年年齡），並且願意瀏覽成人內容。成人興趣只會和同樣選擇的使用者私下比對，不會顯示給其他人，也不會被保存。僅限合意的成年人：任何涉及未成年人、非合意或性交易的行為都嚴格禁止，並可檢舉。";

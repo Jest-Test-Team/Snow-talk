@@ -45,4 +45,13 @@
     <string name="error_server">Set a relay server URL (http:// or https://) under Server settings.</string>
     <string name="tor">Connect through Tor (Orbot)</string>
     <string name="tor_hint">Needs the Orbot app running. Slower, but hides your IP address from the relay.</string>
+    <string name="pick_one">Pick one</string>
+    <string name="adult_title">Adult interests (18+)</string>
+    <string name="adult_teaser">Explicit topics, kinks and orientations. Only matched with other adults who picked the same ones.</string>
+    <string name="adult_show">Show 18+ interests</string>
+    <string name="adult_hide">Hide 18+ interests</string>
+    <string name="adult_warning_title">18+ content warning</string>
+    <string name="adult_warning">This section contains sexually explicit topics. Continue only if you are at least 18 years old (or the age of majority where you live) and want to see adult content.\n\nAdult picks are only compared with other users who chose them too, never shown to anyone else, and never stored. Strictly between consenting adults: any involvement of minors, non-consent or paid sex is forbidden and can be reported.</string>
+    <string name="adult_confirm">I am 18 or older</string>
+    <string name="adult_decline">Not now</string>
 </resources>

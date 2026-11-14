@@ -82,6 +82,24 @@ struct TagPickerView: View {
     @ObservedObject var model: ChatModel
     @Environment(\.dismiss) private var dismiss
     @State private var full = false
+    @State private var askAdult = false
+
+    private func categoryView(_ cat: TagCategory) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(ChatModel.zh ? cat.zh : cat.en).font(.headline)
+                    .foregroundColor(cat.adult ? .red : .primary)
+                if cat.singleChoice { Text("Pick one").font(.caption2).foregroundStyle(.secondary) }
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
+                ForEach(cat.tags, id: \.key) { t in
+                    Chip(label: ChatModel.zh ? t.zh : t.en, selected: model.selectedTags.contains(t.key)) {
+                        full = !model.toggleTag(t.key)
+                    }
+                }
+            }
+        }
+    }
 
     var body: some View {
         NavigationView {
@@ -89,23 +107,32 @@ struct TagPickerView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("\(model.selectedTags.count) of \(model.maxTagCount) picked")
                         .font(.caption).foregroundColor(full ? .red : .secondary)
-                    ForEach(model.catalog, id: \.zh) { cat in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(ChatModel.zh ? cat.zh : cat.en).font(.headline)
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 84), spacing: 6)], spacing: 6) {
-                                ForEach(cat.tags, id: \.key) { t in
-                                    Chip(label: ChatModel.zh ? t.zh : t.en,
-                                         selected: model.selectedTags.contains(t.key)) {
-                                        full = !model.toggleTag(t.key)
-                                    }
-                                }
+                    ForEach(model.catalog, id: \.zh) { cat in categoryView(cat) }
+                    if model.adultAvailable {
+                        if model.adultConfirmed {
+                            ForEach(model.adultCatalog, id: \.zh) { cat in categoryView(cat) }
+                            Button("Hide 18+ interests") { model.revokeAdult() }
+                        } else {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("🔞 Adult interests (18+)").font(.headline)
+                                Text("Explicit topics, kinks and orientations. Only matched with other adults who picked the same ones.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button("Show 18+ interests") { askAdult = true }.buttonStyle(.bordered)
                             }
+                            .padding(12)
+                            .background(Color.secondary.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
                         }
                     }
                 }
                 .padding()
             }
             .navigationTitle(Text("Interests"))
+            .alert("🔞 18+ content warning", isPresented: $askAdult) {
+                Button("I am 18 or older", role: .destructive) { model.adultConfirmed = true }
+                Button("Not now", role: .cancel) {}
+            } message: {
+                Text("This section contains sexually explicit topics. Continue only if you are at least 18 years old (or the age of majority where you live) and want to see adult content. Adult picks are only compared with other users who chose them too, never shown to anyone else, and never stored. Strictly between consenting adults: any involvement of minors, non-consent or paid sex is forbidden and can be reported.")
+            }
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }

@@ -44,4 +44,13 @@
     <string name="error_server">請在「伺服器設定」填入中繼伺服器網址（http:// 或 https://）。</string>
     <string name="tor">透過 Tor 連線（Orbot）</string>
     <string name="tor_hint">需要先開啟 Orbot。速度較慢，但中繼伺服器看不到你的 IP。</string>
+    <string name="pick_one">單選</string>
+    <string name="adult_title">成人興趣（18+）</string>
+    <string name="adult_teaser">包含露骨話題、性癖好與性取向。只會和同樣選擇的成年人私下比對。</string>
+    <string name="adult_show">顯示 18+ 興趣</string>
+    <string name="adult_hide">隱藏 18+ 興趣</string>
+    <string name="adult_warning_title">18 歲以上內容警告</string>
+    <string name="adult_warning">以下內容包含性相關的露骨話題。請確認你已年滿 18 歲（或你所在地區的成年年齡），並且願意瀏覽成人內容。\n\n成人興趣只會和同樣選擇的使用者私下比對，不會顯示給其他人，也不會被保存。僅限合意的成年人：任何涉及未成年人、非合意或性交易的行為都嚴格禁止，並可檢舉。</string>
+    <string name="adult_confirm">我已年滿 18 歲</string>
+    <string name="adult_decline">先不要</string>
 </resources>

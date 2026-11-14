@@ -22,19 +22,45 @@ final class ChatModel: ObservableObject, ChatListener, @unchecked Sendable {
     /// Picked interest keys (canonical, from `catalog`), in pick order.
     @Published var selectedTags: [String] = []
     let catalog: [TagCategory] = tagCatalog()
+    /// Always empty in App Store builds (adult content is compiled out).
+    let adultCatalog: [TagCategory] = adultTagCatalog()
+    let adultAvailable = adultContentEnabled()
     let maxTagCount = Int(maxTags())
+    /// Confirmed 18+ for this launch only (never stored).
+    @Published var adultConfirmed = false
+
+    private func category(of key: String) -> TagCategory? {
+        (catalog + adultCatalog).first { c in c.tags.contains { $0.key == key } }
+    }
+
+    func isAdult(_ key: String) -> Bool { category(of: key)?.adult == true }
 
     /// Pick or unpick a tag; returns false if the limit is reached.
     @discardableResult
     func toggleTag(_ key: String) -> Bool {
         if let i = selectedTags.firstIndex(of: key) { selectedTags.remove(at: i); return true }
+        let cat = category(of: key)
+        if cat?.adult == true && !adultConfirmed { return false }
+        // Single-choice categories (what you're looking for): swap, don't add.
+        if let cat, cat.singleChoice,
+           let i = selectedTags.firstIndex(where: { k in cat.tags.contains { $0.key == k } }) {
+            selectedTags[i] = key
+            return true
+        }
         guard selectedTags.count < maxTagCount else { return false }
         selectedTags.append(key)
         return true
     }
 
+    func revokeAdult() {
+        adultConfirmed = false
+        selectedTags.removeAll { isAdult($0) }
+    }
+
     func label(_ key: String) -> String {
-        for c in catalog { if let t = c.tags.first(where: { $0.key == key }) { return Self.zh ? t.zh : t.en } }
+        for c in catalog + adultCatalog {
+            if let t = c.tags.first(where: { $0.key == key }) { return Self.zh ? t.zh : t.en }
+        }
         return key
     }
 
@@ -44,17 +70,20 @@ final class ChatModel: ObservableObject, ChatListener, @unchecked Sendable {
     private var clientKey: [String] = []
     private var visible = true
 
-    private var parsedTags: [String] { selectedTags }
+    private var parsedTags: [String] { selectedTags.filter { !isAdult($0) } }
+    private var parsedAdultTags: [String] { adultConfirmed ? selectedTags.filter { isAdult($0) } : [] }
 
     private func clientFor() -> SnowClient {
         let nick = nickname.trimmingCharacters(in: .whitespaces)
-        let key = [serverUrl.trimmingCharacters(in: .whitespaces), nick, parsedTags.joined(separator: "\u{0}")]
+        let key = [serverUrl.trimmingCharacters(in: .whitespaces), nick,
+                   parsedTags.joined(separator: "\u{0}"), parsedAdultTags.joined(separator: "\u{0}")]
         if let c = client, key == clientKey { return c }
         let saved = client?.walletExport() ?? Wallet.load()
         let cfg = Config(
             serverUrl: key[0],
             tags: parsedTags,
-            profile: nick.isEmpty ? nil : UserProfile(nickname: nick)
+            adultTags: parsedAdultTags,
+            profile: UserProfile(nickname: nick.isEmpty ? nil : nick, adultOk: !parsedAdultTags.isEmpty)
         )
         let c = SnowClient(cfg: cfg, listener: self)
         if let saved { try? c.walletImport(bytes: saved) }

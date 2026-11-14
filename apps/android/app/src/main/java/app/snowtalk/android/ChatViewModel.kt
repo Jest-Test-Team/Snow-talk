@@ -20,6 +20,8 @@ import uniffi.snow_core.SnowClient
 import uniffi.snow_core.SponsorCard
 import uniffi.snow_core.TagCategory
 import uniffi.snow_core.UserProfile
+import uniffi.snow_core.adultContentEnabled
+import uniffi.snow_core.adultTagCatalog
 import uniffi.snow_core.maxTags
 import uniffi.snow_core.tagCatalog
 
@@ -57,32 +59,68 @@ class ChatViewModel(app: Application) : AndroidViewModel(app), ChatListener {
     /** Picked interest keys (canonical, from [catalog]), in pick order. */
     val selectedTags = mutableStateListOf<String>()
     val catalog: List<TagCategory> by lazy { tagCatalog() }
+    /** Empty in builds without adult content. */
+    val adultCatalog: List<TagCategory> by lazy { adultTagCatalog() }
+    val adultAvailable: Boolean = adultContentEnabled()
     val maxTagCount: Int = maxTags().toInt()
+    /** The user confirmed they are 18+ (asked again every launch, never stored). */
+    var adultConfirmed by mutableStateOf(false)
+
+    private val categoryOf: Map<String, TagCategory> by lazy {
+        (catalog + adultCatalog).flatMap { c -> c.tags.map { it.key to c } }.toMap()
+    }
+
+    fun isAdult(key: String) = categoryOf[key]?.adult == true
 
     /** Pick or unpick a tag; returns false if the limit is reached. */
     fun toggleTag(key: String): Boolean {
         if (selectedTags.remove(key)) return true
+        val cat = categoryOf[key]
+        if (cat?.adult == true && !adultConfirmed) return false
+        // Single-choice categories (what you're looking for): swap, don't add.
+        if (cat?.singleChoice == true) {
+            val other = cat.tags.map { it.key }.firstOrNull { it in selectedTags }
+            if (other != null) {
+                selectedTags[selectedTags.indexOf(other)] = key
+                return true
+            }
+        }
         if (selectedTags.size >= maxTagCount) return false
         selectedTags.add(key)
         return true
+    }
+
+    /** Hide adult content again and drop any adult picks. */
+    fun revokeAdult() {
+        adultConfirmed = false
+        selectedTags.removeAll { isAdult(it) }
     }
 
     @Volatile private var client: SnowClient? = null
     private var clientKey: List<String>? = null
     @Volatile private var visible = true
 
-    private fun parsedTags(): List<String> = selectedTags.toList()
+    private fun parsedTags(): List<String> = selectedTags.filterNot { isAdult(it) }
+    private fun parsedAdultTags(): List<String> =
+        if (adultConfirmed) selectedTags.filter { isAdult(it) } else emptyList()
 
     /** A client is bound to its config; rebuild it (keeping the wallet) when settings change. */
     private fun clientFor(): SnowClient {
-        val key = listOf(serverUrl.trim(), nickname.trim(), parsedTags().joinToString("\u0000"), useTor.toString())
+        val key = listOf(
+            serverUrl.trim(), nickname.trim(), parsedTags().joinToString("\u0000"),
+            parsedAdultTags().joinToString("\u0000"), useTor.toString(),
+        )
         client?.let { if (key == clientKey) return it }
         val saved = client?.walletExport() ?: wallet.load()
         client?.close()
         val cfg = Config(
             serverUrl = key[0],
             tags = parsedTags(),
-            profile = nickname.trim().takeIf { it.isNotEmpty() }?.let { UserProfile(nickname = it) },
+            adultTags = parsedAdultTags(),
+            profile = UserProfile(
+                nickname = nickname.trim().takeIf { it.isNotEmpty() },
+                adultOk = parsedAdultTags().isNotEmpty(),
+            ),
             socksProxy = if (useTor) ORBOT_SOCKS else null,
         )
         val c = SnowClient(cfg, this)
