@@ -90,7 +90,7 @@ mod tests {
             require_common_tag: true,
             profile: None,
             pins: vec![],
-            tor_dir: None,
+            socks_proxy: None,
         }
     }
 

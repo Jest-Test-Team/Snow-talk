@@ -19,7 +19,7 @@ pub struct Resolved {
 
 fn doh_endpoint(dialer: &Dialer) -> Result<Endpoint, NetError> {
     // Direct: dial the resolver by fixed IP. Tor: let the exit resolve its name.
-    let addrs = if dialer.is_tor() {
+    let addrs = if dialer.is_proxied() {
         Vec::new()
     } else {
         DOH_ADDRS

@@ -24,12 +24,8 @@ jobs:
         run: cargo clippy -p snow-config --features tool --all-targets -- -D warnings
       - name: snow-proto / snow-pow build for wasm
         run: cargo build -p snow-proto -p snow-pow -p snow-tokens --target wasm32-unknown-unknown
-      - name: tor feature
-        run: cargo clippy -p snow-core -p snow-cli --features snow-cli/tor --all-targets -- -D warnings
       - name: adult_tags feature (Android build)
         run: cargo test -p snow-core --features adult_tags
-      - name: vendored SQLite is patched
-        run: ./scripts/check-vendor.sh
       - name: server check
         working-directory: server
         run: cargo check --target wasm32-unknown-unknown

@@ -22,11 +22,7 @@ deny = [{ name = "libsignal-protocol" }]
 
 [advisories]
 yanked = "deny"
-# Each ignore must say why it doesn't apply, and be re-checked on every arti upgrade.
+# Each ignore must say why it doesn't apply, and be re-checked on every upgrade of the crate that pulls it in.
 ignore = [
-    # rsa Marvin timing attack: needs private-key decrypt/sign. Arti only uses RSA
-    # to *verify* relay identities (public key), so the attack doesn't apply.
-    { id = "RUSTSEC-2023-0071", reason = "arti uses RSA for public-key verification only" },
-    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but stable (build-time macro, via arti)" },
     { id = "RUSTSEC-2026-0374", reason = "basic-toml via uniffi bindgen (`bindgen` feature, build tool only)" },
 ]

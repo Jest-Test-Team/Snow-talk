@@ -1,8 +1,5 @@
 # Mirrors deny.toml's advisory ignores; each must say why it doesn't apply.
-# rsa Marvin attack: arti uses RSA only to verify relay identities (public key).
-CVE-2023-49092
-RUSTSEC-2023-0071
-# paste: unmaintained, build-time macro via arti.
-RUSTSEC-2024-0436
-# basic-toml: uniffi bindgen build tool only.
+# basic-toml: unmaintained notice; pulled in by UniFFI's binding generator
+# (askama templates) at compile time only, never shipped in the apps.
+# Tracked upstream; drop this once UniFFI/askama move off it.
 RUSTSEC-2026-0374

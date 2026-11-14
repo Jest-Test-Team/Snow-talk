@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! snow-cli chat      [--server URL] [--bucket N]
-//! snow-cli net-check --server URL [--tor DIR]   # DoH + ECH (+ Tor) diagnostics
+//! snow-cli net-check --server URL [--socks 127.0.0.1:9050]   # DoH + ECH (+ Tor) diagnostics
 //! snow-cli iap-test-chain --iap-chain DIR        # test CA for the `vip` scenario
 //! snow-cli pair-test [--server URL] [--bucket N] [--messages N] [--marker TEXT]
 //!                    [--scenario basic|reconnect|rotate|chaff|free|flood|burn|tags|disjoint|media|safety|goodchat|report|trusted|grace]
@@ -124,7 +124,7 @@ struct Args {
     tags: Vec<String>,
     nick: Option<String>,
     pins: Vec<String>,
-    tor_dir: Option<String>,
+    socks: Option<String>,
     config_key: Option<String>,
     iap_chain: Option<String>,
 }
@@ -144,7 +144,7 @@ fn args() -> Args {
         tags: Vec::new(),
         nick: None,
         pins: Vec::new(),
-        tor_dir: None,
+        socks: None,
         config_key: None,
         iap_chain: None,
     };
@@ -167,7 +167,7 @@ fn args() -> Args {
             }
             "--marker" => a.marker = it.next().expect("--marker TEXT"),
             "--scenario" => a.scenario = it.next().expect("--scenario NAME"),
-            "--tor" => a.tor_dir = Some(it.next().expect("--tor DIR")),
+            "--socks" => a.socks = Some(it.next().expect("--socks IP:PORT")),
             "--pin" => a.pins.push(it.next().expect("--pin BASE64")),
             "--paranoid" => a.paranoid = true,
             "--iap-chain" => a.iap_chain = Some(it.next().expect("--iap-chain DIR")),
@@ -207,7 +207,7 @@ fn client(a: &Args) -> (Arc<SnowClient>, Receiver<Ev>) {
                 ..Default::default()
             }),
             pins: a.pins.clone(),
-            tor_dir: a.tor_dir.clone(),
+            socks_proxy: a.socks.clone(),
             config_key: a.config_key.clone(),
         },
         Arc::new(Chan(tx)),
@@ -219,7 +219,7 @@ fn main() {
     let a = args();
     match a.cmd.as_str() {
         "chat" => chat(&a),
-        "net-check" => match debug_net_check(&a.server, a.tor_dir.as_deref()) {
+        "net-check" => match debug_net_check(&a.server, a.socks.as_deref()) {
             Ok((ech, body)) => println!("ech config used: {ech}\n{body}"),
             Err(e) => {
                 eprintln!("FAIL: {e}");

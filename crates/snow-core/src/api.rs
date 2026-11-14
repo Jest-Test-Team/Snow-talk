@@ -53,10 +53,11 @@ pub struct Config {
     /// into the app). `None` = don't fetch remote config (development).
     #[uniffi(default = None)]
     pub config_key: Option<String>,
-    /// Tor mode: a private app directory for Arti's consensus/guard state.
-    /// `None` = direct connections. Requires a build with the `tor` feature.
+    /// Tor mode: a local SOCKS5 proxy such as Orbot's `127.0.0.1:9050`
+    /// (loopback only). Each chat gets its own circuit. `None` = direct.
+    /// On iOS, Orbot runs as a system VPN instead and this stays `None`.
     #[uniffi(default = None)]
-    pub tor_dir: Option<String>,
+    pub socks_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
@@ -87,7 +88,7 @@ pub enum EndReason {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
 pub enum ChatState {
-    /// Tor mode: bootstrapping or building a circuit (can take several seconds).
+    /// Tor mode: connecting through the local Tor proxy.
     ConnectingTor,
     SolvingPow,
     Queued,

@@ -70,9 +70,6 @@ enum EngineError {
     Protocol,
     #[error("config_key is not a 32-byte hex key")]
     BadConfigKey,
-    #[cfg(not(feature = "tor"))]
-    #[error("{0}")]
-    Unsupported(&'static str),
 }
 
 /// Plaintext state of one chat, reachable from the UI thread. Wiped when the
@@ -100,9 +97,6 @@ pub struct Shared {
     pub wallet: Arc<std::sync::Mutex<Wallet>>,
     /// Last verified remote config and sponsor catalog.
     pub remote: Arc<std::sync::Mutex<crate::remote::Remote>>,
-    /// Bootstrapped once, on the first chat in Tor mode.
-    #[cfg(feature = "tor")]
-    pub tor: Arc<tokio::sync::OnceCell<crate::tor::TorHandle>>,
 }
 
 /// A chat that has ended for the UI but still owes the server our good-chat
@@ -365,28 +359,17 @@ async fn settle(
     s.room.close().await;
 }
 
+/// Direct, or Tor through the local SOCKS5 proxy (fresh circuit per chat).
 async fn dialer(
     cfg: &Config,
-    shared: &Shared,
+    _shared: &Shared,
     l: &dyn ChatListener,
 ) -> Result<net::Dialer, EngineError> {
-    let Some(dir) = &cfg.tor_dir else {
+    let Some(proxy) = &cfg.socks_proxy else {
         return Ok(net::Dialer::Direct);
     };
-    #[cfg(feature = "tor")]
-    {
-        l.on_state(ChatState::ConnectingTor);
-        let h = shared
-            .tor
-            .get_or_try_init(|| crate::tor::TorHandle::bootstrap(dir))
-            .await?;
-        Ok(net::Dialer::Tor(h.isolated()))
-    }
-    #[cfg(not(feature = "tor"))]
-    {
-        let _ = (dir, shared, l);
-        Err(EngineError::Unsupported("this build has no Tor support"))
-    }
+    l.on_state(ChatState::ConnectingTor);
+    Ok(net::Dialer::Socks(crate::socks::Socks::isolated(proxy)?))
 }
 
 /// Run one chat: a new match, or (`saved`) a VIP session resumed from disk.

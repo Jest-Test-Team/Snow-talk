@@ -15,6 +15,3 @@ p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
 base64 = "0.22"
 serde_json = "1"
 tokio = { version = "1", features = ["rt"] }
-
-[features]
-tor = ["snow-core/tor"]

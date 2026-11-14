@@ -1,6 +1,6 @@
 //! Transport. Every connection — DoH, the PoW fetch and the WebSockets — goes
-//! through one [`Dialer`]: direct TCP, or a Tor circuit in Tor mode. That way no
-//! request accidentally bypasses Tor.
+//! through one [`Dialer`]: direct TCP, or Tor via the local SOCKS5 proxy in Tor
+//! mode. That way no request accidentally bypasses Tor.
 use futures_util::{SinkExt, StreamExt};
 use rand::rngs::OsRng;
 use snow_proto::{decode_frame, encode_frame, ClientMsg, ServerMsg};
@@ -34,12 +34,11 @@ pub type BoxStream = Box<dyn Stream>;
 #[derive(Clone)]
 pub enum Dialer {
     Direct,
-    #[cfg(feature = "tor")]
-    Tor(crate::tor::TorHandle),
+    Socks(crate::socks::Socks),
 }
 
 impl Dialer {
-    pub fn is_tor(&self) -> bool {
+    pub fn is_proxied(&self) -> bool {
         !matches!(self, Dialer::Direct)
     }
 
@@ -56,8 +55,7 @@ impl Dialer {
                 TcpStream::connect((host, port)).await.map_err(io_err)?,
             )),
             Dialer::Direct => Ok(Box::new(TcpStream::connect(addrs).await.map_err(io_err)?)),
-            #[cfg(feature = "tor")]
-            Dialer::Tor(t) => t.connect(host, port).await,
+            Dialer::Socks(s) => s.connect(host, port).await,
         }
     }
 }
@@ -163,7 +161,7 @@ impl Net {
             .then(|| tls_config(&pins, resolved.ech.as_deref()))
             .transpose()?
             .map(Arc::new);
-        let addrs = if dialer.is_tor() {
+        let addrs = if dialer.is_proxied() {
             Vec::new()
         } else {
             resolved

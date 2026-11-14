@@ -48,9 +48,3 @@ strip = false
 lto = false
 codegen-units = 16
 
-# arti 0.48 pins rusqlite 0.40 → libsqlite3-sys 0.38, whose bundled SQLite 3.53.2
-# has CVE-2026-119375 (RUSTSEC-2026-0459). This is libsqlite3-sys 0.38.2 with the
-# SQLite 3.54.1 amalgamation from libsqlite3-sys 0.39.1. See vendor/README.md.
-# Drop it once arti depends on rusqlite >= 0.41.
-[patch.crates-io]
-libsqlite3-sys = { path = "vendor/libsqlite3-sys" }
