@@ -133,7 +133,8 @@ fn is_local(host: &str) -> bool {
 ///
 /// For a real hostname, the address and ECH config come from DoH (see
 /// [`crate::dns`]), so neither the OS resolver nor the TLS SNI reveals which
-/// site we connect to. Localhost / IP literals (development) skip DoH and ECH.
+/// site we connect to. If no DoH resolver is reachable on a direct connection,
+/// the system resolver is used instead (without ECH). Localhost / IP literals (development) skip DoH and ECH.
 /// With `pins` empty, plain WebPKI validation is used (development only).
 #[derive(Clone)]
 pub struct Net {
@@ -155,7 +156,15 @@ impl Net {
         let resolved = if is_local(&host) {
             crate::dns::Resolved::default()
         } else {
-            crate::dns::resolve(&dialer, &host).await?
+            match crate::dns::resolve(&dialer, &host).await {
+                Ok(r) => r,
+                // Every DoH resolver is unreachable from this network. Rather
+                // than not working at all, use the system resolver (no ECH: the
+                // hostname becomes visible to the network). Never over Tor:
+                // there the exit resolves, so DoH failing is a real error.
+                Err(_) if !dialer.is_proxied() => crate::dns::Resolved::default(),
+                Err(e) => return Err(e),
+            }
         };
         let tls = secure
             .then(|| tls_config(&pins, resolved.ech.as_deref()))
