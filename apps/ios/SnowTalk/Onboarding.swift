@@ -80,24 +80,36 @@ private struct SlideView: View {
     let slide: Slide
 
     var body: some View {
+        // Small screens: smaller art and title, and scroll rather than clip.
+        GeometryReader { geo in
+            let compact = geo.size.height < 560
+            ScrollView(showsIndicators: false) {
+                content(compact: compact)
+                    .frame(maxWidth: .infinity, minHeight: geo.size.height)
+            }
+        }
+    }
+
+    private func content(compact: Bool) -> some View {
         VStack(spacing: 0) {
             Spacer()
             ZStack {
                 Circle().fill(RadialGradient(colors: [.white.opacity(0.35), .white.opacity(0.05)],
                                              center: .center, startRadius: 4, endRadius: 90))
-                    .frame(width: 168, height: 168)
-                Text(slide.emoji).font(.system(size: 76))
+                    .frame(width: compact ? 112 : 168, height: compact ? 112 : 168)
+                Text(slide.emoji).font(.system(size: compact ? 52 : 76))
             }
             Text(slide.title)
-                .font(.system(size: 28, weight: .bold))
+                .font(.system(size: compact ? 24 : 28, weight: .bold))
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
-                .padding(.top, 36)
+                .padding(.top, compact ? 20 : 36)
             Text(slide.body)
                 .font(.system(size: 16))
                 .foregroundColor(.white.opacity(0.92))
                 .multilineTextAlignment(.center)
                 .lineSpacing(5)
+                .fixedSize(horizontal: false, vertical: true)
                 .padding(.top, 16)
             Spacer()
         }

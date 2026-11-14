@@ -13,7 +13,7 @@ final class FirstRunUITests: XCTestCase {
     func testWalkthroughThenInterestPicker() {
         let app = XCUIApplication()
         // Fresh user, English UI.
-        app.launchArguments = ["-onboarded", "NO", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launchArguments = ["--fresh-install", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launch()
 
         let titles = [

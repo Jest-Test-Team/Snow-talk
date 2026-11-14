@@ -7,6 +7,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -81,26 +85,34 @@ fun Onboarding(onDone: () -> Unit) {
                 val s = slides[page]
                 // Parallax-ish fade/scale as pages slide.
                 val offset = ((pager.currentPage - page) + pager.currentPageOffsetFraction).absoluteValue
+                // Small screens: smaller art and title, and scroll rather than clip.
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                val compact = maxHeight < 560.dp
                 Column(
-                    Modifier.fillMaxSize().padding(horizontal = 32.dp).graphicsLayer {
-                        alpha = 1f - offset.coerceIn(0f, 1f) * 0.6f
-                        scaleX = 1f - offset.coerceIn(0f, 1f) * 0.08f
-                        scaleY = scaleX
-                    },
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .heightIn(min = maxHeight)
+                        .padding(horizontal = 32.dp)
+                        .graphicsLayer {
+                            alpha = 1f - offset.coerceIn(0f, 1f) * 0.6f
+                            scaleX = 1f - offset.coerceIn(0f, 1f) * 0.08f
+                            scaleY = scaleX
+                        },
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
                     Box(
-                        Modifier.size(168.dp).clip(CircleShape).background(
+                        Modifier.size(if (compact) 112.dp else 168.dp).clip(CircleShape).background(
                             Brush.radialGradient(listOf(Color.White.copy(alpha = 0.35f), Color.White.copy(alpha = 0.05f))),
                         ),
                         contentAlignment = Alignment.Center,
-                    ) { Text(s.emoji, fontSize = 76.sp) }
-                    Spacer(Modifier.height(36.dp))
+                    ) { Text(s.emoji, fontSize = if (compact) 52.sp else 76.sp) }
+                    Spacer(Modifier.height(if (compact) 20.dp else 36.dp))
                     Text(
                         stringResource(s.title),
                         color = Color.White,
-                        fontSize = 28.sp,
+                        fontSize = if (compact) 24.sp else 28.sp,
                         fontWeight = FontWeight.Bold,
                         textAlign = TextAlign.Center,
                         lineHeight = 34.sp,
@@ -113,6 +125,7 @@ fun Onboarding(onDone: () -> Unit) {
                         lineHeight = 24.sp,
                         textAlign = TextAlign.Center,
                     )
+                }
                 }
             }
             Row(Modifier.fillMaxWidth().padding(vertical = 16.dp), horizontalArrangement = Arrangement.Center) {

@@ -6,6 +6,13 @@ struct SnowTalkApp: App {
     @StateObject private var model = ChatModel()
     /// First launch: show the privacy walkthrough. (A flag, nothing about the user.)
     @AppStorage("onboarded") private var onboarded = false
+
+    init() {
+        // UI tests start as a fresh install. (Only clears the walkthrough flag.)
+        if ProcessInfo.processInfo.arguments.contains("--fresh-install") {
+            UserDefaults.standard.removeObject(forKey: "onboarded")
+        }
+    }
     @Environment(\.scenePhase) private var phase
 
     var body: some Scene {
