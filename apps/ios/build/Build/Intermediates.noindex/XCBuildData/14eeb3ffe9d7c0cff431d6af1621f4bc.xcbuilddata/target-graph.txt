@@ -1,0 +1,2 @@
+Target dependency graph (1 target)
+Target 'SnowTalk' in project 'SnowTalk' (no dependencies)

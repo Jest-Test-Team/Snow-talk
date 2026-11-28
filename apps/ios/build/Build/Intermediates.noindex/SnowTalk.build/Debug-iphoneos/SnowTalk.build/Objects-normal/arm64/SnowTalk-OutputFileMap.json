@@ -1,0 +1,79 @@
+{
+  "" : {
+    "diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalk-primary.dia",
+    "emit-module-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalk-primary-emit-module.d",
+    "emit-module-diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalk-primary-emit-module.dia",
+    "pch" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalk-primary-Bridging-header.pch",
+    "swift-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalk-primary.swiftdeps"
+  },
+  "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/SnowTalk/ChatModel.swift" : {
+    "const-values" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/ChatModel.swiftconstvalues",
+    "dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/ChatModel.d",
+    "diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/ChatModel.dia",
+    "index-unit-output-path" : "/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/ChatModel.o",
+    "llvm-bc" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/ChatModel.bc",
+    "object" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/ChatModel.o",
+    "swift-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/ChatModel.swiftdeps",
+    "swiftmodule" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/ChatModel~partial.swiftmodule"
+  },
+  "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/SnowTalk/FlowLayout.swift" : {
+    "const-values" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/FlowLayout.swiftconstvalues",
+    "dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/FlowLayout.d",
+    "diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/FlowLayout.dia",
+    "index-unit-output-path" : "/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/FlowLayout.o",
+    "llvm-bc" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/FlowLayout.bc",
+    "object" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/FlowLayout.o",
+    "swift-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/FlowLayout.swiftdeps",
+    "swiftmodule" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/FlowLayout~partial.swiftmodule"
+  },
+  "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/SnowTalk/Generated/snow_core.swift" : {
+    "const-values" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/snow_core.swiftconstvalues",
+    "dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/snow_core.d",
+    "diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/snow_core.dia",
+    "index-unit-output-path" : "/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/snow_core.o",
+    "llvm-bc" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/snow_core.bc",
+    "object" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/snow_core.o",
+    "swift-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/snow_core.swiftdeps",
+    "swiftmodule" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/snow_core~partial.swiftmodule"
+  },
+  "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/SnowTalk/Onboarding.swift" : {
+    "const-values" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Onboarding.swiftconstvalues",
+    "dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Onboarding.d",
+    "diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Onboarding.dia",
+    "index-unit-output-path" : "/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Onboarding.o",
+    "llvm-bc" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Onboarding.bc",
+    "object" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Onboarding.o",
+    "swift-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Onboarding.swiftdeps",
+    "swiftmodule" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Onboarding~partial.swiftmodule"
+  },
+  "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/SnowTalk/SnowTalkApp.swift" : {
+    "const-values" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalkApp.swiftconstvalues",
+    "dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalkApp.d",
+    "diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalkApp.dia",
+    "index-unit-output-path" : "/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalkApp.o",
+    "llvm-bc" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalkApp.bc",
+    "object" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalkApp.o",
+    "swift-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalkApp.swiftdeps",
+    "swiftmodule" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/SnowTalkApp~partial.swiftmodule"
+  },
+  "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/SnowTalk/Views.swift" : {
+    "const-values" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Views.swiftconstvalues",
+    "dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Views.d",
+    "diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Views.dia",
+    "index-unit-output-path" : "/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Views.o",
+    "llvm-bc" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Views.bc",
+    "object" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Views.o",
+    "swift-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Views.swiftdeps",
+    "swiftmodule" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Views~partial.swiftmodule"
+  },
+  "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/SnowTalk/Wallet.swift" : {
+    "const-values" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Wallet.swiftconstvalues",
+    "dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Wallet.d",
+    "diagnostics" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Wallet.dia",
+    "index-unit-output-path" : "/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Wallet.o",
+    "llvm-bc" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Wallet.bc",
+    "object" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Wallet.o",
+    "swift-dependencies" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Wallet.swiftdeps",
+    "swiftmodule" : "/Users/dennis/Documents/GitHub/Snow-talk/apps/ios/build/Build/Intermediates.noindex/SnowTalk.build/Debug-iphoneos/SnowTalk.build/Objects-normal/arm64/Wallet~partial.swiftmodule"
+  }
+}
