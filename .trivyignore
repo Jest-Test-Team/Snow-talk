@@ -1,0 +1,5 @@
+# Mirrors deny.toml's advisory ignores; each must say why it doesn't apply.
+# basic-toml: unmaintained notice; pulled in by UniFFI's binding generator
+# (askama templates) at compile time only, never shipped in the apps.
+# Tracked upstream; drop this once UniFFI/askama move off it.
+RUSTSEC-2026-0374

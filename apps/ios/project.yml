@@ -1,0 +1,49 @@
+# XcodeGen spec (`xcodegen generate` → SnowTalk.xcodeproj, not committed).
+# Needs SnowCore.xcframework and SnowTalk/Generated/ from scripts/build-ios.sh.
+name: SnowTalk
+options:
+  bundleIdPrefix: app.snowtalk
+  developmentLanguage: en
+  deploymentTarget:
+    iOS: "15.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  SnowTalk:
+    type: application
+    platform: iOS
+    scheme:
+      testTargets:
+        - SnowTalkUITests
+    sources:
+      - SnowTalk
+    dependencies:
+      - framework: SnowCore.xcframework
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.snowtalk.ios
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Snow-talk
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
+        # Needed to reach a development relay on the local network.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Connect to a Snow-talk relay on your local network (development)."
+        TARGETED_DEVICE_FAMILY: "1"
+        ENABLE_BITCODE: NO
+  SnowTalkUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - SnowTalkUITests
+    dependencies:
+      - target: SnowTalk
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.snowtalk.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: SnowTalk

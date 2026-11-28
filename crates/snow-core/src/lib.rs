@@ -8,6 +8,7 @@
 uniffi::setup_scaffolding!();
 
 mod api;
+mod catalog;
 mod dns;
 mod engine;
 mod http;
@@ -19,12 +20,12 @@ mod pin;
 mod remote;
 mod saved;
 mod screening;
-#[cfg(feature = "tor")]
-mod tor;
+mod socks;
 mod transcript;
 mod wallet;
 
 pub use api::*;
+pub use catalog::*;
 
 /// Library version, exposed to the native shells as a smoke test.
 #[uniffi::export]
@@ -34,8 +35,8 @@ pub fn version() -> String {
 
 /// Testing only (not exported over FFI): resolve `url`'s host via DoH, connect with
 /// ECH if the host publishes a config, and GET it. Returns `(ech_used, body)`.
-/// With `tor_dir`, the request goes over Tor (needs the `tor` feature).
-pub fn debug_net_check(url: &str, tor_dir: Option<&str>) -> Result<(bool, String), String> {
+/// With `socks` (e.g. `127.0.0.1:9050`), everything goes through that Tor proxy.
+pub fn debug_net_check(url: &str, socks: Option<&str>) -> Result<(bool, String), String> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -43,16 +44,9 @@ pub fn debug_net_check(url: &str, tor_dir: Option<&str>) -> Result<(bool, String
     rt.block_on(async {
         let u = url::Url::parse(url).map_err(|e| e.to_string())?;
         let origin = format!("{}://{}", u.scheme(), u.host_str().unwrap_or_default());
-        let dialer = match tor_dir {
+        let dialer = match socks {
             None => net::Dialer::Direct,
-            #[cfg(feature = "tor")]
-            Some(d) => net::Dialer::Tor(
-                tor::TorHandle::bootstrap(d)
-                    .await
-                    .map_err(|e| e.to_string())?,
-            ),
-            #[cfg(not(feature = "tor"))]
-            Some(_) => return Err("built without the tor feature".into()),
+            Some(p) => net::Dialer::Socks(socks::Socks::isolated(p).map_err(|e| e.to_string())?),
         };
         let n = net::Net::new(&origin, &[], dialer)
             .await
