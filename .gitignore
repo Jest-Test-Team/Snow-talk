@@ -23,3 +23,4 @@ apps/android/app/src/main/java/uniffi
 *.p12
 *.mobileprovision
 server/.secrets.prod*
+/apps/ios/build/Build/Intermediates.noindex/XCBuildData
